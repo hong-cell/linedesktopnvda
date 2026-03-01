@@ -7,6 +7,8 @@ from scriptHandler import script
 import controlTypes
 import api
 import ui
+import os
+import nvwave
 import textInfos
 import speech
 import braille
@@ -24,6 +26,32 @@ import time
 import addonHandler
 
 addonHandler.initTranslation()
+
+# Sound file to play after a message is successfully sent
+_SEND_SOUND_PATH = os.path.join(
+	os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+	"sounds", "sent.wav"
+)
+
+def _isImeComposing():
+	"""Check if an IME composition is currently in progress.
+
+	Uses Windows IMM32 API to detect active composition string.
+	Returns True if the user is in the middle of IME character selection.
+	"""
+	try:
+		user32 = ctypes.windll.user32
+		imm32 = ctypes.windll.imm32
+		hwnd = user32.GetForegroundWindow()
+		himc = imm32.ImmGetContext(hwnd)
+		if not himc:
+			return False
+		# GCS_COMPSTR = 0x0008 - composition string
+		comp_size = imm32.ImmGetCompositionStringW(himc, 0x0008, None, 0)
+		imm32.ImmReleaseContext(hwnd, himc)
+		return comp_size > 0
+	except Exception:
+		return False
 
 # Regex pattern to remove spurious spaces between CJK characters.
 # Windows OCR inserts spaces between every CJK character.
@@ -72,6 +100,21 @@ lastFocusedObject = None
 _lastAnnouncedUIAElement = None
 _lastAnnouncedUIAName = None
 _lastOCRElement = None
+# Track the raw UIA focused element (e.g. the edit field) separately from
+# the announced element (which could be a list item found via selection detection).
+# This allows us to detect stuck-focus even after announcing a list item.
+_lastRawFocusedElement = None
+
+# Chat list navigation state.
+# When True, up/down arrows will be handled as chat list navigation
+# even if UIA focus has moved away (e.g. to message input).
+_chatListMode = False
+# Cached reference to the search field UIA element, used to find
+# the chat list even when focus is elsewhere.
+_chatListSearchField = None
+# Cached chat room name, set when navigating the chat list.
+# Used by NVDA+Windows+T to instantly read the name without OCR.
+_currentChatRoomName = None
 
 # Flag to suppress addon while a file dialog is open
 _suppressAddon = False
@@ -561,6 +604,47 @@ def _findSelectedItemInList(handler, focusedElement):
 									pass
 					except Exception:
 						pass
+					
+					# Fallback: try HasKeyboardFocus on each ListItem
+					try:
+						condition = handler.clientObject.CreatePropertyCondition(
+							30003, 50007  # ControlType == ListItem
+						)
+						items = parent.FindAll(UIAHandler.TreeScope_Children, condition)
+						if items:
+							for i in range(items.Length):
+								item = items.GetElement(i)
+								try:
+									if item.CurrentHasKeyboardFocus:
+										log.info("LINE: found selected list item via HasKeyboardFocus")
+										return item
+								except Exception:
+									pass
+					except Exception:
+						pass
+					
+					# Fallback: check LegacyIAccessibleState for FOCUSED (0x4)
+					try:
+						condition = handler.clientObject.CreatePropertyCondition(
+							30003, 50007  # ControlType == ListItem
+						)
+						items = parent.FindAll(UIAHandler.TreeScope_Children, condition)
+						if items:
+							for i in range(items.Length):
+								item = items.GetElement(i)
+								try:
+									state = item.GetCurrentPropertyValue(30100)
+									# 0x4 = STATE_SYSTEM_FOCUSED
+									if isinstance(state, int) and (state & 0x4):
+										log.info(f"LINE: found selected list item via FOCUSED state={state}")
+										return item
+								except Exception:
+									pass
+					except Exception:
+						pass
+					
+					# Store the parent list for OCR fallback
+					_findSelectedItemInList._lastListElement = parent
 					break
 			except Exception:
 				pass
@@ -572,6 +656,450 @@ def _findSelectedItemInList(handler, focusedElement):
 	except Exception:
 		pass
 	return None
+
+
+# Track the index of the last navigated chat list item.
+# This is used when UIA cannot detect which item is selected — we
+# fall back to positional tracking.
+_chatListCurrentIndex = -1
+
+
+def _findListElement(handler, startElement):
+	"""Walk up from startElement to find a parent List element.
+
+	Returns (listElement, walker) or (None, None).
+	"""
+	try:
+		walker = handler.clientObject.RawViewWalker
+		parent = walker.GetParentElement(startElement)
+		depth = 0
+		while parent and depth < 10:
+			try:
+				ct = parent.CurrentControlType
+				if ct == 50008:  # UIA List
+					return parent, walker
+			except Exception:
+				pass
+			try:
+				parent = walker.GetParentElement(parent)
+			except Exception:
+				break
+			depth += 1
+	except Exception:
+		pass
+	return None, None
+
+
+def _getListItems(handler, listElement):
+	"""Get all ListItem children of a List element.
+
+	Returns a UIA element array, or None.
+	"""
+	try:
+		condition = handler.clientObject.CreatePropertyCondition(
+			30003, 50007  # ControlType == ListItem
+		)
+		items = listElement.FindAll(UIAHandler.TreeScope_Children, condition)
+		return items
+	except Exception:
+		return None
+
+
+def _findCurrentItemIndex(items):
+	"""Find the currently selected/focused item index in a list.
+
+	Tries multiple UIA strategies. Returns the index (0-based), or -1.
+	"""
+	if not items:
+		return -1
+	count = items.Length
+	for i in range(count):
+		try:
+			item = items.GetElement(i)
+			# Check SELECTED state (0x2)
+			state = item.GetCurrentPropertyValue(30100)
+			if isinstance(state, int) and (state & 0x2):
+				return i
+		except Exception:
+			pass
+	for i in range(count):
+		try:
+			item = items.GetElement(i)
+			if item.GetCurrentPropertyValue(30079):  # SelectionItemPattern.IsSelected
+				return i
+		except Exception:
+			pass
+	for i in range(count):
+		try:
+			item = items.GetElement(i)
+			if item.CurrentHasKeyboardFocus:
+				return i
+		except Exception:
+			pass
+	for i in range(count):
+		try:
+			item = items.GetElement(i)
+			state = item.GetCurrentPropertyValue(30100)
+			if isinstance(state, int) and (state & 0x4):  # FOCUSED
+				return i
+		except Exception:
+			pass
+	return -1
+
+
+def _clickElement(element):
+	"""Click the center of a UIA element's bounding rectangle."""
+	try:
+		rect = element.CurrentBoundingRectangle
+		cx = int((rect.left + rect.right) / 2)
+		cy = int((rect.top + rect.bottom) / 2)
+		if cx <= 0 or cy <= 0:
+			return False
+		hwnd = ctypes.windll.user32.GetForegroundWindow()
+		if hwnd:
+			ctypes.windll.user32.SetForegroundWindow(hwnd)
+		ctypes.windll.user32.SetCursorPos(cx, cy)
+		time.sleep(0.05)
+		ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # LEFTDOWN
+		time.sleep(0.05)
+		ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # LEFTUP
+		return True
+	except Exception:
+		log.debug("_clickElement failed", exc_info=True)
+		return False
+
+
+def _announceElement(element):
+	"""Extract text from a UIA element and speak it.
+
+	Also attempts to extract the chat room name and store it.
+	Returns the announcement text (or None if OCR fallback used).
+	"""
+	global _currentChatRoomName
+	textParts = _extractTextFromUIAElement(element)
+	if textParts:
+		announcement = " ".join(textParts)
+		speech.cancelSpeech()
+		ui.message(announcement)
+		# Try to extract chat name from the text
+		_storeChatNameFromText(announcement)
+		return announcement
+	else:
+		# Try OCR as fallback
+		speech.cancelSpeech()
+		_ocrAndStoreChatName(element)
+		return None
+
+
+def _storeChatNameFromText(text):
+	"""Extract and store the chat room name from OCR/UIA text.
+
+	The first line of the text typically contains the chat name,
+	possibly followed by unread count like '( 5 )'.
+	"""
+	global _currentChatRoomName
+	if not text:
+		return
+	import re
+	# Take the first line
+	lines = text.strip().split('\n')
+	if lines:
+		firstLine = lines[0].strip()
+		# Remove trailing unread count like ( 123 )
+		firstLine = re.sub(r'\s*\(\s*\d+\s*\)\s*$', '', firstLine)
+		# Remove leading time patterns like '上午 11:08' or '下午 3:52'
+		firstLine = re.sub(r'^[上下]午\s*\d+\s*[:：]\s*\d+\s*', '', firstLine)
+		firstLine = firstLine.strip()
+		if firstLine:
+			_currentChatRoomName = firstLine
+			log.info(f"LINE: stored chat room name: {_currentChatRoomName}")
+
+
+def _ocrAndStoreChatName(element):
+	"""OCR an element and store the chat room name from the result."""
+	global _currentChatRoomName
+	try:
+		rect = element.CurrentBoundingRectangle
+		left = int(rect.left)
+		top = int(rect.top)
+		width = int(rect.right - rect.left)
+		height = int(rect.bottom - rect.top)
+		if width <= 0 or height <= 0 or left < -width or top < -height:
+			ui.message(_("List item"))
+			return
+
+		log.debug(f"LINE OCR+name started for element at ({left},{top}) {width}x{height}")
+
+		# Use the same OCR mechanism as _ocrReadElementText
+		try:
+			import screenBitmap
+			from contentRecog import uwpOcr
+
+			langs = uwpOcr.getLanguages()
+			if not langs:
+				ui.message(_("List item"))
+				return
+
+			# Pick language: prefer Traditional Chinese
+			ocrLang = None
+			for candidate in ["zh-Hant-TW", "zh-TW", "zh-Hant"]:
+				if candidate in langs:
+					ocrLang = candidate
+					break
+			if not ocrLang:
+				for lang in langs:
+					if lang.startswith("zh"):
+						ocrLang = lang
+						break
+			if not ocrLang:
+				ocrLang = langs[0]
+
+			recognizer = uwpOcr.UwpOcr(language=ocrLang)
+			resizeFactor = recognizer.getResizeFactor(width, height)
+			# Use higher resize factor for small elements to improve OCR accuracy
+			minFactor = 2
+			if width < 100 or height < 100:
+				minFactor = max(3, int(200 / max(min(width, height), 1)))
+			if resizeFactor < minFactor:
+				resizeFactor = minFactor
+
+			class _ImgInfo:
+				def __init__(self, w, h, factor, sLeft, sTop):
+					self.recogWidth = w * factor
+					self.recogHeight = h * factor
+					self.resizeFactor = factor
+					self._screenLeft = sLeft
+					self._screenTop = sTop
+
+				def convertXToScreen(self, x):
+					return self._screenLeft + int(x / self.resizeFactor)
+
+				def convertYToScreen(self, y):
+					return self._screenTop + int(y / self.resizeFactor)
+
+				def convertWidthToScreen(self, w):
+					return int(w / self.resizeFactor)
+
+				def convertHeightToScreen(self, h):
+					return int(h / self.resizeFactor)
+
+			imgInfo = _ImgInfo(width, height, resizeFactor, left, top)
+
+			if resizeFactor > 1:
+				sb = screenBitmap.ScreenBitmap(
+					width * resizeFactor,
+					height * resizeFactor
+				)
+				ocrPixels = sb.captureImage(left, top, width, height)
+			else:
+				sb = screenBitmap.ScreenBitmap(width, height)
+				ocrPixels = sb.captureImage(left, top, width, height)
+
+			# Store references to prevent garbage collection during async OCR
+			_ocrAndStoreChatName._recognizer = recognizer
+			_ocrAndStoreChatName._pixels = ocrPixels
+			_ocrAndStoreChatName._imgInfo = imgInfo
+
+			def _onOcrResult(result):
+				import wx
+				def _handleOnMain():
+					global _currentChatRoomName
+					try:
+						if isinstance(result, Exception):
+							log.debug(f"LINE OCR+name error: {result}")
+							ui.message(_("List item"))
+							return
+						ocrText = getattr(result, 'text', '') or ''
+						ocrText = _removeCJKSpaces(ocrText.strip())
+						if ocrText:
+							log.info(f"LINE OCR+name result: {ocrText!r}")
+							speech.cancelSpeech()
+							ui.message(ocrText)
+							_storeChatNameFromText(ocrText)
+						else:
+							log.debug("LINE OCR+name: no text found")
+							ui.message(_("List item"))
+					except Exception as e:
+						log.debug(f"LINE OCR+name result handler error: {e}")
+					finally:
+						_ocrAndStoreChatName._recognizer = None
+						_ocrAndStoreChatName._pixels = None
+						_ocrAndStoreChatName._imgInfo = None
+				wx.CallAfter(_handleOnMain)
+
+			recognizer.recognize(ocrPixels, imgInfo, _onOcrResult)
+		except Exception:
+			log.debug("OCR fallback failed", exc_info=True)
+			ui.message(_("List item"))
+	except Exception:
+		log.debug("_ocrAndStoreChatName failed", exc_info=True)
+		ui.message(_("List item"))
+
+
+def _isInChatListContext(handler):
+	"""Check if the current UIA focus is near a chat list.
+
+	Returns (True, listElement, items, currentIndex) if we're in a
+	chat list context, or (False, None, None, -1) otherwise.
+	Also caches the search field element for later use.
+	"""
+	global _chatListCurrentIndex, _chatListSearchField
+	try:
+		rawElement = handler.clientObject.GetFocusedElement()
+		if rawElement is None:
+			return False, None, None, -1
+
+		# Check if focus is directly on a list item
+		try:
+			ct = rawElement.CurrentControlType
+		except Exception:
+			ct = 0
+
+		if ct == 50007:  # ListItem - focus is on a list item already
+			listEl, walker = _findListElement(handler, rawElement)
+			if listEl:
+				# Check if this list is in the left sidebar (chat list area)
+				# vs the right side (message list area)
+				try:
+					hwnd = ctypes.windll.user32.GetForegroundWindow()
+					if hwnd:
+						wndRect = ctypes.wintypes.RECT()
+						ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(wndRect))
+						wndWidth = wndRect.right - wndRect.left
+						if wndWidth > 0:
+							sidebarRight = wndRect.left + int(wndWidth * 0.45)
+							listRect = listEl.CurrentBoundingRectangle
+							if listRect.left >= sidebarRight:
+								# List is on the right side — message list, not chat list
+								return False, None, None, -1
+				except Exception:
+					log.debug("Sidebar position check failed", exc_info=True)
+				items = _getListItems(handler, listEl)
+				if items and items.Length > 0:
+					idx = _findCurrentItemIndex(items)
+					if idx < 0:
+						idx = _chatListCurrentIndex
+					return True, listEl, items, idx
+
+		# Check if focus is on the search edit field (near a list)
+		if ct == 50004:  # Edit control
+			label = _detectEditFieldLabel(rawElement, handler)
+			# If focus is on message input, we're NOT in chat list context
+			# Translators: Label for the LINE message input field
+			if label == _("Message input"):
+				return False, None, None, -1
+			# Translators: Label for the search chat rooms field in LINE
+			if label == _("Search chat rooms"):
+				# Cache the search field for later
+				_chatListSearchField = rawElement
+				listEl, walker = _findListElement(handler, rawElement)
+				if listEl:
+					items = _getListItems(handler, listEl)
+					if items and items.Length > 0:
+						idx = _findCurrentItemIndex(items)
+						if idx < 0:
+							idx = _chatListCurrentIndex
+						return True, listEl, items, idx
+	except Exception:
+		log.debug("_isInChatListContext failed", exc_info=True)
+	return False, None, None, -1
+
+
+def _findChatListFromCache(handler):
+	"""Find the chat list using the cached search field element.
+
+	Used when _chatListMode is True but focus has moved elsewhere.
+	Returns (listElement, items) or (None, None).
+	"""
+	global _chatListSearchField
+	if _chatListSearchField is None:
+		return None, None
+	try:
+		listEl, walker = _findListElement(handler, _chatListSearchField)
+		if listEl:
+			items = _getListItems(handler, listEl)
+			if items and items.Length > 0:
+				return listEl, items
+	except Exception:
+		log.debug("_findChatListFromCache failed", exc_info=True)
+		_chatListSearchField = None
+	return None, None
+
+
+def _findChatListFromWindow(handler):
+	"""Find the chat list by walking the UIA tree from the LINE window root.
+
+	Fallback when _findChatListFromCache fails (stale COM ref).
+	Finds List elements and picks the one in the left sidebar area.
+	Returns (listElement, items) or (None, None).
+	"""
+	global _chatListSearchField
+	try:
+		hwnd = ctypes.windll.user32.GetForegroundWindow()
+		if not hwnd:
+			return None, None
+
+		# Get window rect to identify sidebar area
+		wndRect = ctypes.wintypes.RECT()
+		ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(wndRect))
+		wndWidth = wndRect.right - wndRect.left
+		if wndWidth <= 0:
+			return None, None
+
+		# The sidebar is roughly the left 35% of the window
+		sidebarRight = wndRect.left + int(wndWidth * 0.45)
+
+		# Get root UIA element for the window
+		rootEl = handler.clientObject.ElementFromHandle(hwnd)
+		if not rootEl:
+			return None, None
+
+		# Find all List elements
+		listCondition = handler.clientObject.CreatePropertyCondition(
+			30003, 50008  # ControlType == List
+		)
+		lists = rootEl.FindAll(UIAHandler.TreeScope_Descendants, listCondition)
+		if not lists:
+			return None, None
+
+		# Pick the list in the sidebar (left side of window)
+		for i in range(lists.Length):
+			try:
+				listEl = lists.GetElement(i)
+				rect = listEl.CurrentBoundingRectangle
+				# List must be in the left sidebar area
+				if rect.left < sidebarRight and rect.right <= sidebarRight + 50:
+					items = _getListItems(handler, listEl)
+					if items and items.Length > 0:
+						log.info(f"LINE: found chat list from window root, {items.Length} items")
+						# Try to cache the search field for next time
+						_tryCacheSearchField(handler, listEl)
+						return listEl, items
+			except Exception:
+				continue
+	except Exception:
+		log.debug("_findChatListFromWindow failed", exc_info=True)
+	return None, None
+
+
+def _tryCacheSearchField(handler, listElement):
+	"""Try to find and cache the search field near a list element."""
+	global _chatListSearchField
+	try:
+		walker = handler.clientObject.RawViewWalker
+		parent = walker.GetParentElement(listElement)
+		if not parent:
+			return
+		# Look for an Edit control sibling
+		editCondition = handler.clientObject.CreatePropertyCondition(
+			30003, 50004  # ControlType == Edit
+		)
+		edits = parent.FindAll(UIAHandler.TreeScope_Children, editCondition)
+		if edits and edits.Length > 0:
+			_chatListSearchField = edits.GetElement(0)
+			log.debug("LINE: cached search field from list parent")
+	except Exception:
+		pass
 
 
 def _detectEditFieldLabel(element, handler):
@@ -727,7 +1255,7 @@ def _queryAndSpeakUIAFocus():
 	"""
 	if _suppressAddon:
 		return
-	global _lastAnnouncedUIAElement, _lastAnnouncedUIAName
+	global _lastAnnouncedUIAElement, _lastAnnouncedUIAName, _lastRawFocusedElement
 	try:
 		handler = UIAHandler.handler
 		if handler is None:
@@ -745,9 +1273,15 @@ def _queryAndSpeakUIAFocus():
 		
 		targetElement = rawElement
 		
-		# If focus is stuck on the same element (e.g. edit field),
-		# try to find the selected item in a nearby list
-		if elementId and elementId == _lastAnnouncedUIAElement:
+		# Detect if UIA focus is stuck on the same element (e.g. edit field)
+		# by comparing with _lastRawFocusedElement (not _lastAnnouncedUIAElement,
+		# which may have been updated to a selected list item's ID).
+		rawFocusStuck = (elementId and elementId == _lastRawFocusedElement)
+		_lastRawFocusedElement = elementId
+		
+		if rawFocusStuck:
+			# UIA focus hasn't moved - the edit field still has focus.
+			# Try to find the selected item in a nearby list.
 			selectedItem = _findSelectedItemInList(handler, rawElement)
 			if selectedItem:
 				targetElement = selectedItem
@@ -756,9 +1290,24 @@ def _queryAndSpeakUIAFocus():
 					elementId = str(runtimeId) if runtimeId else None
 				except Exception:
 					elementId = None
+				# Check if this is the same item we already announced
 				if elementId and elementId == _lastAnnouncedUIAElement:
 					return
 			else:
+				# Could not find selected item via UIA properties.
+				# Try OCR on the list area as a fallback.
+				listEl = getattr(_findSelectedItemInList, '_lastListElement', None)
+				if listEl:
+					log.info("LINE: selected item not found via UIA, trying OCR on list")
+					_findSelectedItemInList._lastListElement = None
+					_lastAnnouncedUIAElement = None
+					_ocrReadElementText(listEl)
+					return
+				return
+		else:
+			# UIA focus has moved to a new element.
+			# Check if this is the same item we already announced
+			if elementId and elementId == _lastAnnouncedUIAElement:
 				return
 		
 		_lastAnnouncedUIAElement = elementId
@@ -2016,7 +2565,7 @@ class AppModule(appModuleHandler.AppModule):
 			if callType == "voice":
 				menuY = phoneY + int(23 * scale)
 			else:
-				menuY = phoneY + int(50 * scale)
+				menuY = phoneY + int(70 * scale)
 			
 			log.info(
 				f"LINE: clicking menu item '{callType}' at "
@@ -2024,13 +2573,69 @@ class AppModule(appModuleHandler.AppModule):
 			)
 			appModRef._clickAtPosition(menuX, menuY, hwnd)
 			
-			# Step 3: After delay, handle confirmation dialog
-			core.callLater(800, _handleConfirmDialog)
+			# Step 3: After delay, handle confirmation
+			# Video calls show a camera preview (longer load time)
+			# Voice calls show a simple confirmation dialog
+			if callType == "video":
+				core.callLater(1500, _clickVideoStart)
+			else:
+				core.callLater(800, _handleConfirmDialog)
 		
 		core.callLater(500, _clickMenuItem)
 		
+		def _clickVideoStart():
+			"""Click the green phone button on video call camera preview.
+			
+			The video call shows a camera preview screen (相機畫面預覽)
+			with a green phone icon at the bottom center of the window.
+			"""
+			try:
+				import ctypes
+				import ctypes.wintypes
+				
+				# Re-read the current foreground window rect,
+				# as the camera preview may be a different window.
+				curHwnd = ctypes.windll.user32.GetForegroundWindow()
+				curRect = ctypes.wintypes.RECT()
+				ctypes.windll.user32.GetWindowRect(
+					curHwnd, ctypes.byref(curRect)
+				)
+				curLeft = curRect.left
+				curTop = curRect.top
+				curW = curRect.right - curRect.left
+				curH = curRect.bottom - curRect.top
+				
+				vScale = _getDpiScale()
+				
+				# The green phone button is at horizontal center,
+				# near the bottom of the camera preview window.
+				# From the screenshot: roughly center-x, ~50px from bottom.
+				btnX = curLeft + curW // 2
+				btnY = curRect.bottom - int(45 * vScale)
+				
+				log.info(
+					f"LINE: clicking video call start button at "
+					f"({btnX}, {btnY}), window=({curLeft},{curTop},"
+					f"{curRect.right},{curRect.bottom})"
+				)
+				
+				ui.message("視訊通話確認")
+				appModRef._clickAtPosition(btnX, btnY, curHwnd)
+				
+				ui.message("已開始視訊通話")
+			except Exception as e:
+				log.warning(
+					f"LINE: click video start failed: {e}",
+					exc_info=True
+				)
+				ui.message("無法點擊開始按鈕")
+		
 		def _handleConfirmDialog():
-			"""OCR the confirmation dialog, announce it, and auto-click 開始."""
+			"""OCR the confirmation dialog, announce it, and auto-click 開始.
+			
+			This is used for voice calls only. Voice calls show a simple
+			confirmation dialog centered on the window.
+			"""
 			try:
 				cScale = _getDpiScale()
 				dialogW = int(320 * cScale)
@@ -2137,10 +2742,7 @@ class AppModule(appModuleHandler.AppModule):
 							if ocrText:
 								ui.message(ocrText)
 							else:
-								if callType == "voice":
-									ui.message("語音通話確認")
-								else:
-									ui.message("視訊通話確認")
+								ui.message("語音通話確認")
 							
 							core.callLater(300, _clickStart)
 						except Exception as e:
@@ -2166,7 +2768,7 @@ class AppModule(appModuleHandler.AppModule):
 				_clickStart()
 		
 		def _clickStart():
-			"""Click the 開始 (Start) button on the confirmation dialog."""
+			"""Click the 開始 (Start) button on the voice call confirmation dialog."""
 			try:
 				sScale = _getDpiScale()
 				winCenterX = winLeft + winW // 2
@@ -2180,10 +2782,7 @@ class AppModule(appModuleHandler.AppModule):
 				)
 				appModRef._clickAtPosition(startBtnX, startBtnY, hwnd)
 				
-				if callType == "voice":
-					ui.message("已開始語音通話")
-				else:
-					ui.message("已開始視訊通話")
+				ui.message("已開始語音通話")
 			except Exception as e:
 				log.warning(
 					f"LINE: click 開始 failed: {e}",
@@ -3140,7 +3739,10 @@ class AppModule(appModuleHandler.AppModule):
 		category="LINE Desktop",
 	)
 	def script_readChatRoomName(self, gesture):
-		"""Read the current chat room name via OCR."""
+		"""Read the current chat room name.
+
+		Always uses OCR on the header area for reliable reading.
+		"""
 		try:
 			self._readChatRoomName()
 		except Exception as e:
@@ -3222,12 +3824,67 @@ class AppModule(appModuleHandler.AppModule):
 		if _suppressAddon:
 			gesture.send()
 			return
-		global _lastOCRElement
-		# Reset OCR dedup so new navigation always triggers OCR for new element
+		global _lastOCRElement, _chatListMode
+		# Exiting chat list mode on Tab/Shift+Tab navigation
+		_chatListMode = False
 		_lastOCRElement = None
-		# Pass the gesture through to LINE
 		gesture.send()
-		# After a delay, query the UIA focused element
+		core.callLater(100, _queryAndSpeakUIAFocus)
+
+	def script_chatListArrow(self, gesture):
+		"""Navigate the chat list with up/down arrows.
+
+		When in chat list context (search field or chat list item),
+		passes the arrow key to LINE, then sends Tab twice to reach
+		the chatroom name and reads it aloud.
+
+		When NOT in chat list context (e.g. message list), passes
+		the arrow key through normally with standard announcement.
+		"""
+		if _suppressAddon:
+			gesture.send()
+			return
+
+		global _lastOCRElement
+		_lastOCRElement = None
+
+		# Check if we're in the chat list context
+		try:
+			handler = UIAHandler.handler
+			if handler:
+				inList, listEl, items, currentIdx = _isInChatListContext(handler)
+				if inList:
+					# In chat list — arrow + Tab x2 to read chatroom name
+					gesture.send()
+
+					def _sendFirstTab():
+						"""Send first Tab key, then schedule second Tab."""
+						try:
+							from keyboardHandler import KeyboardInputGesture
+							tabGesture = KeyboardInputGesture.fromName("tab")
+							tabGesture.send()
+						except Exception:
+							log.debugWarning("First Tab simulation failed", exc_info=True)
+						core.callLater(50, _sendSecondTabAndRead)
+
+					def _sendSecondTabAndRead():
+						"""Send second Tab key, then read the focused element."""
+						try:
+							from keyboardHandler import KeyboardInputGesture
+							tabGesture = KeyboardInputGesture.fromName("tab")
+							tabGesture.send()
+						except Exception:
+							log.debugWarning("Second Tab simulation failed", exc_info=True)
+						# Read the focused element after Tab x2
+						core.callLater(100, _queryAndSpeakUIAFocus)
+
+					core.callLater(200, _sendFirstTab)
+					return
+		except Exception:
+			log.debugWarning("Chat list context check failed", exc_info=True)
+
+		# Not in chat list — pass through normally (message list, etc.)
+		gesture.send()
 		core.callLater(100, _queryAndSpeakUIAFocus)
 
 	# Map Control+number keys to LINE tab names
@@ -3247,6 +3904,11 @@ class AppModule(appModuleHandler.AppModule):
 		if _suppressAddon:
 			gesture.send()
 			return
+		global _currentChatRoomName, _chatListMode, _chatListSearchField
+		# Clear chat state when switching tabs
+		_currentChatRoomName = None
+		_chatListMode = False
+		_chatListSearchField = None
 		gesture.send()
 		# Extract the number key from the gesture identifier
 		# gesture.mainKeyName gives us the key name like "1", "2", "3"
@@ -3255,15 +3917,79 @@ class AppModule(appModuleHandler.AppModule):
 		if tabName:
 			ui.message(tabName)
 
+	def script_sendMessageAndPlaySound(self, gesture):
+		"""Pass Enter to LINE. If a message was sent, play a sound.
+
+		Uses a delayed outcome check: after sending the Enter key,
+		waits briefly then checks if the input field is now empty
+		(message was sent) or still has text (IME confirmation).
+		This works with both IMM32 and TSF input methods.
+		"""
+		if _suppressAddon:
+			gesture.send()
+			return
+		# Check if the currently focused UIA element is the message input
+		isMessageInput = False
+		try:
+			handler = UIAHandler.handler
+			if handler:
+				rawElement = handler.clientObject.GetFocusedElement()
+				if rawElement:
+					ct = rawElement.CurrentControlType
+					if ct == 50004:  # Edit control
+						label = _detectEditFieldLabel(rawElement, handler)
+						log.debug(f"LINE Enter key: edit field label={label!r}")
+						if label == _("Message input"):
+							isMessageInput = True
+		except Exception:
+			log.debugWarning("Error detecting message input for send sound", exc_info=True)
+		# Pass Enter key through to LINE
+		gesture.send()
+		# After Enter, schedule a delayed check to see if message was actually sent
+		if isMessageInput:
+			def _checkFieldAndPlaySound():
+				try:
+					handler = UIAHandler.handler
+					if not handler:
+						return
+					el = handler.clientObject.GetFocusedElement()
+					if not el:
+						return
+					ct = el.CurrentControlType
+					fieldEmpty = True
+					if ct == 50004:  # Still on an edit control
+						try:
+							val = el.GetCurrentPropertyValue(30045)  # ValueValue
+							log.debug(f"LINE post-Enter value: {val!r}")
+							if val and isinstance(val, str) and val.strip():
+								fieldEmpty = False
+						except Exception:
+							pass
+					# Play sound only if the field is now empty (message was sent)
+					if fieldEmpty:
+						log.debug("LINE: field empty after Enter, playing send sound")
+						if os.path.isfile(_SEND_SOUND_PATH):
+							try:
+								nvwave.playWaveFile(_SEND_SOUND_PATH, asynchronous=True)
+							except Exception:
+								log.debugWarning("Failed to play send sound", exc_info=True)
+					else:
+						log.debug("LINE: field still has text after Enter, skipping sound (IME confirm)")
+				except Exception:
+					log.debugWarning("Error in delayed send sound check", exc_info=True)
+			# Wait 300ms for LINE to process the Enter key
+			core.callLater(300, _checkFieldAndPlaySound)
+
 	__gestures = {
 		"kb:tab": "navigateAndTrack",
 		"kb:shift+tab": "navigateAndTrack",
-		"kb:upArrow": "navigateAndTrack",
-		"kb:downArrow": "navigateAndTrack",
+		"kb:upArrow": "chatListArrow",
+		"kb:downArrow": "chatListArrow",
 		"kb:leftArrow": "navigateAndTrack",
 		"kb:rightArrow": "navigateAndTrack",
 		"kb:control+o": "openFileDialog",
 		"kb:control+1": "switchTabAndAnnounce",
 		"kb:control+2": "switchTabAndAnnounce",
 		"kb:control+3": "switchTabAndAnnounce",
+		"kb:enter": "sendMessageAndPlaySound",
 	}
