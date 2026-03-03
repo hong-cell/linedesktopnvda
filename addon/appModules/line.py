@@ -3980,6 +3980,780 @@ class AppModule(appModuleHandler.AppModule):
 			# Wait 300ms for LINE to process the Enter key
 			core.callLater(300, _checkFieldAndPlaySound)
 
+	# ── Right-click context menu actions ─────────────────────────────────
+
+	def _rightClickAtPosition(self, x, y, hwnd=None):
+		"""Perform a right-click at the given screen coordinates."""
+		import ctypes
+		import time
+
+		if hwnd is None:
+			hwnd = ctypes.windll.user32.GetForegroundWindow()
+		if hwnd:
+			ctypes.windll.user32.SetForegroundWindow(hwnd)
+
+		ctypes.windll.user32.SetCursorPos(int(x), int(y))
+		time.sleep(0.05)
+		ctypes.windll.user32.mouse_event(0x0008, 0, 0, 0, 0)  # RIGHTDOWN
+		time.sleep(0.05)
+		ctypes.windll.user32.mouse_event(0x0010, 0, 0, 0, 0)  # RIGHTUP
+
+	def _getMessageCenter(self):
+		"""Get the center coordinates of the currently focused message.
+
+		Returns (cx, cy, hwnd) or None.
+		"""
+		import ctypes
+
+		try:
+			handler = UIAHandler.handler
+			rawEl = handler.clientObject.GetFocusedElement()
+			if not rawEl:
+				return None
+
+			rect = rawEl.CurrentBoundingRectangle
+			cx = int((rect.left + rect.right) / 2)
+			cy = int((rect.top + rect.bottom) / 2)
+
+			if cx <= 0 or cy <= 0:
+				return None
+
+			hwnd = ctypes.windll.user32.GetForegroundWindow()
+			return (cx, cy, hwnd)
+		except Exception as e:
+			log.debug(f"LINE: _getMessageCenter failed: {e}")
+			return None
+
+	def _contextMenuAction(self, itemIndex, actionName, afterCallback=None):
+		"""Right-click current message and select an item from the context menu.
+
+		Menu items top to bottom: 0=回覆, 1=複製, 2=分享, 3=收回
+		Uses UIA to find the popup menu and click directly on the target item.
+		Falls back to offset-based clicking if UIA detection fails.
+
+		If the right-click hits the text content area (producing a text
+		selection menu like '全選'), dismisses and retries at a different
+		Y offset on the message bubble.
+		"""
+		try:
+			handler = UIAHandler.handler
+			rawEl = handler.clientObject.GetFocusedElement()
+			if not rawEl:
+				ui.message("找不到目前的訊息")
+				return
+
+			rect = rawEl.CurrentBoundingRectangle
+			cx = int((rect.left + rect.right) / 2)
+			cy = int((rect.top + rect.bottom) / 2)
+			elTop = int(rect.top)
+			elBottom = int(rect.bottom)
+
+			if cx <= 0 or cy <= 0:
+				ui.message("找不到目前的訊息")
+				return
+
+			hwnd = ctypes.windll.user32.GetForegroundWindow()
+
+			# Get LINE window rect to clamp click positions
+			import ctypes.wintypes as wintypes
+			winRect = wintypes.RECT()
+			ctypes.windll.user32.GetWindowRect(
+				hwnd, ctypes.byref(winRect)
+			)
+			winTop = int(winRect.top)
+			winBottom = int(winRect.bottom)
+		except Exception as e:
+			log.debug(f"LINE: _contextMenuAction getElement failed: {e}")
+			ui.message("找不到目前的訊息")
+			return
+
+		# Click positions to try, ordered by reliability.
+		# Center is tried first: it clicks on the message text,
+		# which produces the correct context menu (回覆/複製/分享/收回).
+		# Clicking outside the text bubble (far-right/far-left)
+		# produces the wrong menu (全選/背景設定), so those are
+		# last-resort fallbacks.
+		# Clamp Y within the LINE window to avoid clicking taskbar.
+		elLeft = int(rect.left)
+		elRight = int(rect.right)
+		clampedTop = max(elTop + 2, winTop + 10)
+		clampedBottom = min(elBottom - 2, winBottom - 10)
+		clampedCenter = max(winTop + 10, min(cy, winBottom - 10))
+
+		# Wait for modifier keys (Ctrl, Shift, Alt) to be physically
+		# released before proceeding.  The user likely just pressed
+		# Ctrl+C, and if we send any keystrokes while Ctrl is still
+		# held, NVDA's keyboard hook will combine them (e.g.
+		# Escape → Ctrl+Escape → Windows Start Menu).
+		VK_CONTROL = 0x11
+		VK_SHIFT = 0x10
+		VK_MENU = 0x12  # Alt
+		log.debug("LINE: waiting for modifier keys to be released")
+		GetAsyncKeyState = ctypes.windll.user32.GetAsyncKeyState
+		for _wait in range(40):  # up to ~2 seconds
+			held = any(GetAsyncKeyState(vk) & 0x8000
+					   for vk in (VK_CONTROL, VK_SHIFT, VK_MENU))
+			if not held:
+				break
+			time.sleep(0.05)
+		log.debug("LINE: modifiers released, proceeding with right-click")
+
+		clickPositions = [
+			(cx, clampedCenter, "center"),
+			(cx, clampedTop, "top"),
+			(cx, clampedBottom, "bottom"),
+			(elRight - 15, clampedCenter, "far-right"),
+			(elLeft + 15, clampedCenter, "far-left"),
+		]
+
+		appModRef = self
+
+		def _attemptAtOffset(posIdx=0):
+			"""Right-click at clickPositions[posIdx] and find the menu item."""
+			if posIdx >= len(clickPositions):
+				# All click positions exhausted.
+				# For copy action, fall back to OCR + direct clipboard.
+				if actionName == "複製":
+					log.info(
+						"LINE: all click positions failed, "
+						"falling back to OCR copy"
+					)
+					try:
+						rect = rawEl.CurrentBoundingRectangle
+						elW = int(rect.right - rect.left)
+						elH = int(rect.bottom - rect.top)
+						if elW > 0 and elH > 0:
+							ocrText = appModRef._ocrWindowArea(
+								hwnd,
+								region=(
+									int(rect.left),
+									int(rect.top),
+									elW, elH,
+								),
+								sync=True,
+								timeout=3.0,
+							)
+							ocrText = _removeCJKSpaces(
+								ocrText.strip()
+							) if ocrText else ""
+							if ocrText:
+								# Remove timestamp lines
+								lines = ocrText.split("\n")
+								content = []
+								for ln in lines:
+									stripped = ln.strip()
+									# Skip timestamp lines
+									if re.match(
+										r'^[上下午]*\s*\d{1,2}\s*:\s*\d{2}',
+										stripped
+									):
+										continue
+									if stripped:
+										content.append(stripped)
+								if content:
+									copyText = "\n".join(content)
+									import api
+									api.copyToClip(copyText)
+									log.info(
+										f"LINE: OCR fallback copied: "
+										f"{copyText!r}"
+									)
+									ui.message("複製")
+									if afterCallback:
+										core.callLater(
+											500, afterCallback
+										)
+									return
+					except Exception as e:
+						log.debug(
+							f"LINE: OCR fallback failed: {e}",
+							exc_info=True,
+						)
+				ui.message(f"找不到「{actionName}」選項")
+				return
+
+			clickX, clickY, posLabel = clickPositions[posIdx]
+			log.info(
+				f"LINE: right-clicking message at "
+				f"({clickX}, {clickY}) "
+				f"[{posLabel}] for {actionName}"
+			)
+			appModRef._rightClickAtPosition(
+				clickX, clickY, hwnd
+			)
+
+			def _findAndClickMenuItem(retriesLeft=4):
+				"""Find the context menu popup and click the target item.
+
+				If the popup or menu items aren't found yet, retries up to
+				retriesLeft times with 200ms between attempts.
+				If the popup is found but has the wrong menu (target action
+				not present), dismisses it and tries the next click position.
+				"""
+				try:
+					uiaHandler = UIAHandler.handler
+					if not uiaHandler:
+						log.debug("LINE: no UIA handler")
+						return
+
+					import ctypes.wintypes as wintypes
+
+					# Find popup window via EnumThreadWindows
+					pid = wintypes.DWORD()
+					tid = ctypes.windll.user32.GetWindowThreadProcessId(
+						hwnd, ctypes.byref(pid)
+					)
+					popupCandidates = []
+
+					WNDENUMPROC = ctypes.WINFUNCTYPE(
+						ctypes.c_bool,
+						wintypes.HWND,
+						wintypes.LPARAM,
+					)
+
+					def _enumCallback(enumHwnd, lParam):
+						if (
+							enumHwnd != hwnd
+							and ctypes.windll.user32.IsWindowVisible(enumHwnd)
+						):
+							# Filter by window size to skip tooltips
+							wRect = wintypes.RECT()
+							ctypes.windll.user32.GetWindowRect(
+								enumHwnd, ctypes.byref(wRect)
+							)
+							w = wRect.right - wRect.left
+							h = wRect.bottom - wRect.top
+							if w >= 50 and h >= 30:
+								popupCandidates.append(enumHwnd)
+							else:
+								log.debug(
+									f"LINE: skipping small window "
+									f"{enumHwnd}: {w}x{h}"
+								)
+						return True
+
+					ctypes.windll.user32.EnumThreadWindows(
+						tid, WNDENUMPROC(_enumCallback), 0
+					)
+
+					popupHwnd = None
+					if popupCandidates:
+						popupHwnd = popupCandidates[0]
+						log.debug(
+							f"LINE: found popup via EnumThreadWindows: "
+							f"hwnd {popupHwnd} "
+							f"(candidates: {len(popupCandidates)})"
+						)
+					else:
+						for dy in [0, -40, -80, 40, 80]:
+							pt = wintypes.POINT(clickX, clickY + dy)
+							candidateHwnd = (
+								ctypes.windll.user32.WindowFromPoint(pt)
+							)
+							if candidateHwnd and candidateHwnd != hwnd:
+								popupHwnd = candidateHwnd
+								log.debug(
+									f"LINE: found popup via "
+									f"WindowFromPoint offset dy={dy}: "
+									f"hwnd {popupHwnd}"
+								)
+								break
+
+					if not popupHwnd:
+						if retriesLeft > 0:
+							log.debug(
+								f"LINE: no popup window found, "
+								f"retrying ({retriesLeft} left)"
+							)
+							core.callLater(
+								200,
+								lambda: _findAndClickMenuItem(
+									retriesLeft - 1
+								),
+							)
+							return
+						log.debug(
+							"LINE: no popup window found after "
+							"all retries, trying next position"
+						)
+						core.callLater(
+							300,
+							lambda: _attemptAtOffset(
+								posIdx + 1
+							),
+						)
+						return
+
+					log.debug(
+						f"LINE: using popup hwnd {popupHwnd}, "
+						f"LINE main hwnd = {hwnd}"
+					)
+
+					element = uiaHandler.clientObject.ElementFromHandle(
+						popupHwnd
+					)
+					if not element:
+						if retriesLeft > 0:
+							log.debug(
+								"LINE: ElementFromHandle returned nothing, "
+								f"retrying ({retriesLeft} left)"
+							)
+							core.callLater(
+								200,
+								lambda: _findAndClickMenuItem(
+									retriesLeft - 1
+								),
+							)
+							return
+						log.debug(
+							"LINE: ElementFromHandle returned nothing"
+						)
+						return
+
+					# Validate popup is a real context menu,
+					# not a tooltip (ct=50033) or other junk
+					try:
+						ct = element.CurrentControlType
+						name = element.CurrentName or ""
+						eRect = element.CurrentBoundingRectangle
+						eW = int(eRect.right - eRect.left)
+						eH = int(eRect.bottom - eRect.top)
+						log.debug(
+							f"LINE: popup element: ct={ct}, "
+							f"name={name!r}, "
+							f"rect=({eRect.left},{eRect.top})-"
+							f"({eRect.right},{eRect.bottom}), "
+							f"{eW}x{eH}"
+						)
+						# Reject tooltips and tiny popups
+						if ct == 50033 or eW < 50 or eH < 30:
+							log.debug(
+								f"LINE: popup is not a context "
+								f"menu (ct={ct}, {eW}x{eH}), "
+								f"skipping"
+							)
+							# No real popup, go to next offset
+							core.callLater(
+								300,
+								lambda: _attemptAtOffset(
+									posIdx + 1
+								),
+							)
+							return
+					except Exception:
+						pass
+
+					walker = uiaHandler.clientObject.RawViewWalker
+
+					def _getMenuItemText(item):
+						"""Extract text label from a menu item's children."""
+						try:
+							textChild = walker.GetFirstChildElement(item)
+							childIdx = 0
+							while textChild and childIdx < 10:
+								try:
+									n = textChild.CurrentName
+									if n and n.strip():
+										return n.strip()
+								except Exception:
+									pass
+								try:
+									gc = walker.GetFirstChildElement(
+										textChild
+									)
+									gcIdx = 0
+									while gc and gcIdx < 5:
+										try:
+											gcN = gc.CurrentName
+											if gcN and gcN.strip():
+												return gcN.strip()
+										except Exception:
+											pass
+										try:
+											gc = (
+												walker.GetNextSiblingElement(
+													gc
+												)
+											)
+										except Exception:
+											break
+										gcIdx += 1
+								except Exception:
+									pass
+								try:
+									textChild = (
+										walker.GetNextSiblingElement(
+											textChild
+										)
+									)
+								except Exception:
+									break
+								childIdx += 1
+						except Exception:
+							pass
+						return ""
+
+					def _collectMenuItems(parent, depth=0, prefix=""):
+						"""Walk UIA tree and collect menu item elements."""
+						items = []
+						child = walker.GetFirstChildElement(parent)
+						idx = 0
+						while child and idx < 30:
+							try:
+								ct = child.CurrentControlType
+								childName = ""
+								try:
+									childName = child.CurrentName or ""
+								except Exception:
+									pass
+								childRect = child.CurrentBoundingRectangle
+								childH = int(
+									childRect.bottom - childRect.top
+								)
+								childW = int(
+									childRect.right - childRect.left
+								)
+								log.debug(
+									f"LINE: {prefix}child[{idx}] "
+									f"ct={ct}, name={childName!r}, "
+									f"rect=({childRect.left},"
+									f"{childRect.top})-"
+									f"({childRect.right},"
+									f"{childRect.bottom}), "
+									f"{childW}x{childH}"
+								)
+
+								if childW <= 0 or childH <= 0:
+									pass
+								elif (
+									20 <= childH <= 80
+									and childW >= childH * 2
+								):
+									itemText = _getMenuItemText(child)
+									log.debug(
+										f"LINE: {prefix}child[{idx}] "
+										f"menu item row, "
+										f"text={itemText!r}"
+									)
+									items.append((child, itemText))
+								elif childH > 80 and depth < 5:
+									log.debug(
+										f"LINE: {prefix}child[{idx}] "
+										f"large container, recursing"
+									)
+									subItems = _collectMenuItems(
+										child, depth + 1,
+										prefix + "  "
+									)
+									items.extend(subItems)
+								elif childH > 10:
+									itemText = _getMenuItemText(child)
+									items.append((child, itemText))
+							except Exception:
+								pass
+							try:
+								child = walker.GetNextSiblingElement(
+									child
+								)
+							except Exception:
+								break
+							idx += 1
+						return items
+
+					menuItems = _collectMenuItems(element)
+					log.debug(
+						f"LINE: found {len(menuItems)} menu items: "
+						f"{[t for _, t in menuItems]}"
+					)
+
+					if not menuItems:
+						if retriesLeft > 0:
+							log.debug(
+								f"LINE: popup found but 0 menu items, "
+								f"retrying ({retriesLeft} left)"
+							)
+							core.callLater(
+								200,
+								lambda: _findAndClickMenuItem(
+									retriesLeft - 1
+								),
+							)
+							return
+						log.debug(
+							"LINE: 0 menu items after all retries"
+						)
+
+					# Strategy 1: Match by UIA text label
+					targetItem = None
+					popupOcrResult = ""
+					for item, text in menuItems:
+						if text and actionName in text:
+							targetItem = item
+							log.info(
+								f"LINE: matched menu item "
+								f"'{actionName}' by UIA text: "
+								f"{text!r}"
+							)
+							break
+
+					# Strategy 2: OCR the entire popup window
+					if not targetItem and menuItems:
+						log.debug(
+							"LINE: no UIA text match, "
+							"trying whole-popup OCR"
+						)
+						try:
+							popupRect = (
+								element.CurrentBoundingRectangle
+							)
+							popupW = int(
+								popupRect.right - popupRect.left
+							)
+							popupH = int(
+								popupRect.bottom - popupRect.top
+							)
+							if popupW > 0 and popupH > 0:
+								ocrText = appModRef._ocrWindowArea(
+									popupHwnd,
+									region=(
+										int(popupRect.left),
+										int(popupRect.top),
+										popupW,
+										popupH,
+									),
+									sync=True,
+									timeout=3.0,
+								)
+								ocrText = _removeCJKSpaces(
+									ocrText.strip()
+								) if ocrText else ""
+								popupOcrResult = ocrText
+								log.debug(
+									f"LINE: popup OCR result: "
+									f"{ocrText!r}"
+								)
+								if ocrText and actionName in ocrText:
+									lines = ocrText.split("\n")
+									targetLineIdx = -1
+									for li, line in enumerate(lines):
+										if actionName in line:
+											targetLineIdx = li
+											break
+									if targetLineIdx >= 0:
+										nItems = len(menuItems)
+										nLines = len(lines)
+										if nItems > 0:
+											itemIdx = min(
+												int(
+													targetLineIdx
+													* nItems
+													/ nLines
+												),
+												nItems - 1,
+											)
+											targetItem = (
+												menuItems[itemIdx][0]
+											)
+											log.info(
+												f"LINE: matched "
+												f"'{actionName}' "
+												f"via popup OCR, "
+												f"line "
+												f"{targetLineIdx}"
+												f"/{nLines} → "
+												f"item {itemIdx}"
+												f"/{nItems}"
+											)
+						except Exception as e:
+							log.debug(
+								f"LINE: popup OCR failed: {e}"
+							)
+
+					if targetItem:
+						# Click the target item
+						iRect = targetItem.CurrentBoundingRectangle
+						itemCx = int(
+							(iRect.left + iRect.right) / 2
+						)
+						itemCy = int(
+							(iRect.top + iRect.bottom) / 2
+						)
+						log.info(
+							f"LINE: clicking menu item "
+							f"'{actionName}' at "
+							f"({itemCx}, {itemCy})"
+						)
+						ctypes.windll.user32.SetCursorPos(
+							itemCx, itemCy
+						)
+						time.sleep(0.05)
+						ctypes.windll.user32.mouse_event(
+							0x0002, 0, 0, 0, 0
+						)  # LEFTDOWN
+						time.sleep(0.05)
+						ctypes.windll.user32.mouse_event(
+							0x0004, 0, 0, 0, 0
+						)  # LEFTUP
+						log.info(
+							f"LINE: context menu "
+							f"'{actionName}' selected"
+						)
+						ui.message(actionName)
+						# Context menu auto-dismisses after
+						# clicking a menu item. No Escape needed.
+						if afterCallback:
+							core.callLater(500, afterCallback)
+					else:
+						# Wrong menu (no 複製 found).
+						# Dismiss and skip to OCR for copy,
+						# or try next position for others.
+						log.debug(
+							f"LINE: wrong menu at [{posLabel}]"
+							f", dismissing"
+						)
+						from keyboardHandler import (
+							KeyboardInputGesture,
+						)
+						KeyboardInputGesture.fromName(
+							"escape"
+						).send()
+						if actionName == "複製":
+							log.info(
+								"LINE: no Copy in menu, "
+								"falling back to OCR"
+							)
+							core.callLater(
+								300,
+								lambda: _attemptAtOffset(
+									len(clickPositions)
+								),
+							)
+						else:
+							# Non-copy, try next pos
+							core.callLater(
+								300,
+								lambda: _attemptAtOffset(
+									posIdx + 1
+								),
+							)
+
+				except Exception as e:
+					log.debug(
+						f"LINE: context menu detection "
+						f"failed: {e}", exc_info=True
+					)
+					try:
+						from keyboardHandler import (
+							KeyboardInputGesture,
+						)
+						KeyboardInputGesture.fromName(
+							"escape"
+						).send()
+					except Exception:
+						pass
+
+			# Wait for context menu to appear, then find and click
+			core.callLater(300, _findAndClickMenuItem)
+
+		_attemptAtOffset(0)
+
+	@script(
+		gesture="kb:NVDA+windows+r",
+		description=_("Reply to the current message"),
+		category="LINE",
+	)
+	def script_replyMessage(self, gesture):
+		"""Reply to the current message via right-click context menu."""
+		self._contextMenuAction(0, "回覆")
+
+	@script(
+		gesture="kb:control+c",
+		description=_("Copy the current message"),
+		category="LINE",
+	)
+	def script_copyMessage(self, gesture):
+		"""Copy the current message via right-click context menu.
+
+		Only activates in message list context.
+		In edit fields, passes Control+C through normally.
+
+		NOTE: We must check the actual UIA focused element, not
+		NVDA's focus object (api.getFocusObject()).  LINE's Qt6
+		framework does not fire UIA focus change events during
+		Tab/arrow navigation, so NVDA's internal focus object
+		may be stale (e.g. still pointing to a search field
+		even though the real focus moved to the message list).
+		"""
+		try:
+			handler = UIAHandler.handler
+			rawEl = handler.clientObject.GetFocusedElement()
+			if rawEl:
+				ct = rawEl.CurrentControlType
+				if ct == 50004:  # Edit control
+					gesture.send()
+					return
+		except Exception:
+			pass
+		self._contextMenuAction(1, "複製")
+
+	@script(
+		gesture="kb:NVDA+windows+delete",
+		description=_("Recall (unsend) the current message"),
+		category="LINE",
+	)
+	def script_recallMessage(self, gesture):
+		"""Recall (unsend) the current message via right-click context menu.
+
+		After selecting recall, LINE shows a confirmation dialog.
+		We speak a prompt and wait for user to press Y (confirm) or N (cancel).
+		"""
+		appModRef = self
+
+		def _handleRecallDialog():
+			ui.message("確認要收回嗎？按 Y 確認，按 N 取消")
+			appModRef._recallPending = True
+			appModRef.bindGesture("kb:y", "confirmRecall")
+			appModRef.bindGesture("kb:n", "cancelRecall")
+			# Auto-cancel after 10 seconds
+			def _autoCancel():
+				if getattr(appModRef, '_recallPending', False):
+					appModRef._endRecallConfirmation(False)
+			core.callLater(10000, _autoCancel)
+
+		self._contextMenuAction(3, "收回", afterCallback=_handleRecallDialog)
+
+	def _endRecallConfirmation(self, confirmed):
+		"""End the recall confirmation and clean up Y/N bindings."""
+		if not getattr(self, '_recallPending', False):
+			return
+		self._recallPending = False
+
+		# Remove dynamic Y/N gesture bindings
+		import inputCore
+		for key in ("kb:y", "kb:n"):
+			try:
+				normalized = inputCore.normalizeGestureIdentifier(key)
+				if normalized in self._gestureMap:
+					del self._gestureMap[normalized]
+			except Exception:
+				pass
+
+		from keyboardHandler import KeyboardInputGesture
+		if confirmed:
+			KeyboardInputGesture.fromName("enter").send()
+			ui.message("已收回")
+		else:
+			KeyboardInputGesture.fromName("escape").send()
+			ui.message("已取消")
+
+	def script_confirmRecall(self, gesture):
+		"""User pressed Y to confirm message recall."""
+		self._endRecallConfirmation(True)
+
+	def script_cancelRecall(self, gesture):
+		"""User pressed N to cancel message recall."""
+		self._endRecallConfirmation(False)
+
 	__gestures = {
 		"kb:tab": "navigateAndTrack",
 		"kb:shift+tab": "navigateAndTrack",
