@@ -29,6 +29,20 @@ This add-on enhances the NVDA screen reader's support for the LINE Desktop appli
     3. Press `NVDA+Windows+C` to make a voice call, or `NVDA+Windows+V` to make a video call.
 * **Pre-check**: Before sending a message or making a call, always check the chat history to ensure you are contacting the right person.
 
+## Message Reading and Copying
+
+* **Reading Messages**: When navigating through the message list, the add-on uses a "copy-first" approach to read messages. It automatically right-clicks the message → selects "Copy" → reads the clipboard content. The original clipboard content is restored after reading.
+* **Copying Messages**: Press `Control+C` in the message list, and the add-on will copy the message text to the clipboard via the right-click context menu.
+* **OCR Fallback**: If copying via the context menu fails (e.g., the menu or menu item cannot be found), the add-on will automatically fall back to OCR (Optical Character Recognition) to read the message content.
+
+### Sound Effects
+
+* **Default (Copy Success)**: If the message is read via the context menu copy method, no special sound effect is played.
+* **OCR Fallback Sound**: If the message is read via OCR, the `ocr.wav` sound effect will be played to indicate that the content may not be fully accurate.
+
+> [!WARNING]
+> OCR (Optical Character Recognition) results are **not 100% accurate**. If you hear the `ocr.wav` sound effect, be aware that the text may differ from the actual message content. To verify the exact content, it is recommended to check the message on your phone or another platform.
+
 ## Keyboard Shortcuts
 
 > [!NOTE]

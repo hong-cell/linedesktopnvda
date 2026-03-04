@@ -1318,14 +1318,46 @@ def _queryAndSpeakUIAFocus():
 		
 		_lastAnnouncedUIAElement = elementId
 		
-		# Extract text using safe read-only COM properties only
-		textParts = _extractTextFromUIAElement(targetElement)
-		
 		# Get control type for role name
 		try:
 			ct = targetElement.CurrentControlType
 		except Exception:
 			ct = 0
+		
+		# For ListItem elements, check if it's in the message area
+		# (right side of window) vs chat list sidebar (left side).
+		# Only use copy-first for message list items.
+		if ct == 50007:  # ListItem
+			isMessageItem = False
+			try:
+				elRect = targetElement.CurrentBoundingRectangle
+				elLeft = int(elRect.left)
+				# Get the LINE window rect
+				lineHwnd = ctypes.windll.user32.GetForegroundWindow()
+				import ctypes.wintypes as _wt
+				wr = _wt.RECT()
+				ctypes.windll.user32.GetWindowRect(
+					lineHwnd, ctypes.byref(wr)
+				)
+				winWidth = int(wr.right - wr.left)
+				winLeft = int(wr.left)
+				# Message list items are in the right portion
+				# (element left edge > 35% of window width from left)
+				if winWidth > 0 and (elLeft - winLeft) > winWidth * 0.35:
+					isMessageItem = True
+			except Exception:
+				pass
+			if isMessageItem:
+				log.info(
+					f"LINE UIA focus: ct={ct} (message ListItem), "
+					f"runtimeId={elementId}, using copy-first read"
+				)
+				_copyAndReadMessage(targetElement)
+				return
+			# Not a message item — fall through to standard handling
+		
+		# For non-ListItem elements, use standard UIA text extraction
+		textParts = _extractTextFromUIAElement(targetElement)
 		
 		# For edit fields, try to detect field labels (login / search / message input)
 		if ct == 50004:  # Edit control
@@ -1359,10 +1391,9 @@ def _queryAndSpeakUIAFocus():
 			_lastAnnouncedUIAName = roleName
 			speech.cancelSpeech()
 			ui.message(roleName)
-			# 只對清單項目（訊息）嘗試 OCR 讀取，
-			# 不對編輯框、按鈕等非訊息元素進行操作
+			# For non-message ListItems (chat sidebar), fall back to OCR
+			# when UIA text is empty
 			if ct == 50007:  # ListItem
-				# 避免對同一元素重複觸發 OCR
 				global _lastOCRElement
 				try:
 					rid = str(targetElement.GetRuntimeId())
@@ -1376,6 +1407,438 @@ def _queryAndSpeakUIAFocus():
 		
 	except Exception:
 		log.debugWarning("_queryAndSpeakUIAFocus failed", exc_info=True)
+
+
+def _copyAndReadMessage(targetElement):
+	"""Read a message by right-clicking → Copy → reading clipboard content.
+
+	This is the preferred method for reading messages because it returns
+	the exact text that LINE stores, unlike OCR which may be inaccurate.
+
+	Falls back to OCR (with ocr.wav sound alert) if copy fails.
+	Restores the original clipboard content after reading.
+	"""
+	try:
+		rect = targetElement.CurrentBoundingRectangle
+		cx = int((rect.left + rect.right) / 2)
+		cy = int((rect.top + rect.bottom) / 2)
+		if cx <= 0 or cy <= 0:
+			log.debug("LINE: _copyAndReadMessage: invalid element position")
+			_ocrReadMessageFallback(targetElement)
+			return
+	except Exception as e:
+		log.debug(f"LINE: _copyAndReadMessage: failed to get rect: {e}")
+		_ocrReadMessageFallback(targetElement)
+		return
+
+	hwnd = ctypes.windll.user32.GetForegroundWindow()
+
+	# Save current clipboard content
+	origClip = None
+	try:
+		origClip = api.getClipData()
+	except Exception:
+		pass
+
+	# Clear clipboard so we can detect if copy succeeded
+	try:
+		api.copyToClip("")
+	except Exception:
+		pass
+
+	# Get LINE window rect to clamp click positions
+	try:
+		import ctypes.wintypes as wintypes
+		winRect = wintypes.RECT()
+		ctypes.windll.user32.GetWindowRect(
+			hwnd, ctypes.byref(winRect)
+		)
+		winTop = int(winRect.top)
+		winBottom = int(winRect.bottom)
+	except Exception:
+		winTop = 0
+		winBottom = 9999
+
+	elLeft = int(rect.left)
+	elRight = int(rect.right)
+	elTop = int(rect.top)
+	elBottom = int(rect.bottom)
+	clampedCenter = max(winTop + 10, min(cy, winBottom - 10))
+	clampedTop = max(elTop + 2, winTop + 10)
+	clampedBottom = min(elBottom - 2, winBottom - 10)
+	leftThird = elLeft + (elRight - elLeft) // 3
+	rightThird = elLeft + 2 * (elRight - elLeft) // 3
+
+	clickPositions = [
+		(cx, clampedCenter, "center"),
+		(rightThird, clampedCenter, "right-third"),
+		(leftThird, clampedCenter, "left-third"),
+		(cx, clampedTop, "top"),
+		(cx, clampedBottom, "bottom"),
+	]
+
+	def _attemptCopyAtOffset(posIdx=0):
+		"""Right-click at clickPositions[posIdx] and try to copy."""
+		if posIdx >= len(clickPositions):
+			# All positions exhausted — fall back to OCR
+			log.info("LINE: copy-read all positions failed, falling back to OCR")
+			_restoreClipboard(origClip)
+			_ocrReadMessageFallback(targetElement)
+			return
+
+		clickX, clickY, posLabel = clickPositions[posIdx]
+		log.info(
+			f"LINE: copy-read right-clicking at "
+			f"({clickX}, {clickY}) [{posLabel}]"
+		)
+
+		# Perform right-click
+		if hwnd:
+			ctypes.windll.user32.SetForegroundWindow(hwnd)
+		ctypes.windll.user32.SetCursorPos(int(clickX), int(clickY))
+		time.sleep(0.05)
+		ctypes.windll.user32.mouse_event(0x0008, 0, 0, 0, 0)  # RIGHTDOWN
+		time.sleep(0.05)
+		ctypes.windll.user32.mouse_event(0x0010, 0, 0, 0, 0)  # RIGHTUP
+
+		# Wait for context menu, then find Copy
+		core.callLater(300, lambda: _findCopyMenuItem(posIdx, retriesLeft=4))
+
+	def _findCopyMenuItem(posIdx, retriesLeft=4):
+		"""Find the context menu and click Copy."""
+		try:
+			uiaHandler = UIAHandler.handler
+			if not uiaHandler:
+				_restoreClipboard(origClip)
+				_ocrReadMessageFallback(targetElement)
+				return
+
+			import ctypes.wintypes as wintypes
+
+			# Find popup window
+			pid = wintypes.DWORD()
+			tid = ctypes.windll.user32.GetWindowThreadProcessId(
+				hwnd, ctypes.byref(pid)
+			)
+			popupCandidates = []
+
+			WNDENUMPROC = ctypes.WINFUNCTYPE(
+				ctypes.c_bool,
+				wintypes.HWND,
+				wintypes.LPARAM,
+			)
+
+			def _enumCb(enumHwnd, lParam):
+				if (
+					enumHwnd != hwnd
+					and ctypes.windll.user32.IsWindowVisible(enumHwnd)
+				):
+					wRect = wintypes.RECT()
+					ctypes.windll.user32.GetWindowRect(
+						enumHwnd, ctypes.byref(wRect)
+					)
+					w = wRect.right - wRect.left
+					h = wRect.bottom - wRect.top
+					if w >= 50 and h >= 30:
+						popupCandidates.append(enumHwnd)
+				return True
+
+			ctypes.windll.user32.EnumThreadWindows(
+				tid, WNDENUMPROC(_enumCb), 0
+			)
+
+			popupHwnd = None
+			if popupCandidates:
+				popupHwnd = popupCandidates[0]
+			else:
+				clickX, clickY, _ = clickPositions[posIdx]
+				for dy in [0, -40, -80, 40, 80]:
+					pt = wintypes.POINT(clickX, clickY + dy)
+					candHwnd = ctypes.windll.user32.WindowFromPoint(pt)
+					if candHwnd and candHwnd != hwnd:
+						popupHwnd = candHwnd
+						break
+
+			if not popupHwnd:
+				if retriesLeft > 0:
+					core.callLater(
+						200,
+						lambda: _findCopyMenuItem(posIdx, retriesLeft - 1),
+					)
+					return
+				# No popup found, try next position
+				core.callLater(300, lambda: _attemptCopyAtOffset(posIdx + 1))
+				return
+
+			element = uiaHandler.clientObject.ElementFromHandle(popupHwnd)
+			if not element:
+				if retriesLeft > 0:
+					core.callLater(
+						200,
+						lambda: _findCopyMenuItem(posIdx, retriesLeft - 1),
+					)
+					return
+				core.callLater(300, lambda: _attemptCopyAtOffset(posIdx + 1))
+				return
+
+			# Validate popup is a real context menu
+			try:
+				pCt = element.CurrentControlType
+				eRect = element.CurrentBoundingRectangle
+				eW = int(eRect.right - eRect.left)
+				eH = int(eRect.bottom - eRect.top)
+				if pCt == 50033 or eW < 50 or eH < 30:
+					core.callLater(300, lambda: _attemptCopyAtOffset(posIdx + 1))
+					return
+			except Exception:
+				pass
+
+			walker = uiaHandler.clientObject.RawViewWalker
+
+			# Collect menu items
+			menuItems = []
+			def _collectItems(parent, depth=0):
+				child = walker.GetFirstChildElement(parent)
+				idx = 0
+				while child and idx < 30:
+					try:
+						cRect = child.CurrentBoundingRectangle
+						cH = int(cRect.bottom - cRect.top)
+						cW = int(cRect.right - cRect.left)
+						if cW > 0 and cH > 0:
+							if 20 <= cH <= 80 and cW >= cH * 2:
+								# Get text from children
+								itemText = ""
+								tc = walker.GetFirstChildElement(child)
+								ci = 0
+								while tc and ci < 10:
+									try:
+										n = tc.CurrentName
+										if n and n.strip():
+											itemText = n.strip()
+											break
+									except Exception:
+										pass
+									try:
+										tc = walker.GetNextSiblingElement(tc)
+									except Exception:
+										break
+									ci += 1
+								menuItems.append((child, itemText))
+							elif cH > 80 and depth < 5:
+								_collectItems(child, depth + 1)
+							elif cH >= 20:
+								menuItems.append((child, ""))
+					except Exception:
+						pass
+					try:
+						child = walker.GetNextSiblingElement(child)
+					except Exception:
+						break
+					idx += 1
+
+			_collectItems(element)
+			log.debug(
+				f"LINE: copy-read found {len(menuItems)} menu items: "
+				f"{[t for _, t in menuItems]}"
+			)
+
+			if not menuItems:
+				if retriesLeft > 0:
+					core.callLater(
+						200,
+						lambda: _findCopyMenuItem(posIdx, retriesLeft - 1),
+					)
+					return
+
+			# Find "複製" item by UIA text
+			copyItem = None
+			for item, text in menuItems:
+				if text and "複製" in text:
+					copyItem = item
+					log.info(f"LINE: copy-read matched '複製' by UIA: {text!r}")
+					break
+
+			# Strategy 2: OCR the popup when UIA text is all empty
+			if not copyItem and menuItems and len(menuItems) >= 3:
+				log.debug("LINE: copy-read no UIA text, trying popup OCR")
+				try:
+					popupRect = element.CurrentBoundingRectangle
+					popupW = int(popupRect.right - popupRect.left)
+					popupH = int(popupRect.bottom - popupRect.top)
+					if popupW > 0 and popupH > 0:
+						import screenBitmap
+						from contentRecog import uwpOcr
+						import threading
+
+						pLeft = int(popupRect.left)
+						pTop = int(popupRect.top)
+						sb = screenBitmap.ScreenBitmap(popupW, popupH)
+						pixels = sb.captureImage(pLeft, pTop, popupW, popupH)
+
+						langs = uwpOcr.getLanguages()
+						ocrLang = None
+						for cand in ["zh-Hant-TW", "zh-TW", "zh-Hant"]:
+							if cand in langs:
+								ocrLang = cand
+								break
+						if not ocrLang:
+							for lang in langs:
+								if lang.startswith("zh"):
+									ocrLang = lang
+									break
+						if not ocrLang and langs:
+							ocrLang = langs[0]
+
+						if ocrLang:
+							recognizer = uwpOcr.UwpOcr(language=ocrLang)
+							resizeFactor = recognizer.getResizeFactor(popupW, popupH)
+
+							if resizeFactor > 1:
+								sb2 = screenBitmap.ScreenBitmap(
+									popupW * resizeFactor,
+									popupH * resizeFactor,
+								)
+								ocrPixels = sb2.captureImage(
+									pLeft, pTop, popupW, popupH
+								)
+							else:
+								ocrPixels = pixels
+
+							class _ImgInfo:
+								def __init__(self, w, h, factor, sL, sT):
+									self.recogWidth = w * factor
+									self.recogHeight = h * factor
+									self.resizeFactor = factor
+									self._screenLeft = sL
+									self._screenTop = sT
+								def convertXToScreen(self, x):
+									return self._screenLeft + int(x / self.resizeFactor)
+								def convertYToScreen(self, y):
+									return self._screenTop + int(y / self.resizeFactor)
+								def convertWidthToScreen(self, w):
+									return int(w / self.resizeFactor)
+								def convertHeightToScreen(self, h):
+									return int(h / self.resizeFactor)
+
+							imgInfo = _ImgInfo(popupW, popupH, resizeFactor, pLeft, pTop)
+
+							resultHolder = [None]
+							event = threading.Event()
+							def _onOcr(result):
+								resultHolder[0] = result
+								event.set()
+							recognizer.recognize(ocrPixels, imgInfo, _onOcr)
+							event.wait(timeout=3.0)
+
+							ocrText = ""
+							result = resultHolder[0]
+							if result and not isinstance(result, Exception):
+								ocrText = getattr(result, 'text', '') or ''
+								ocrText = _removeCJKSpaces(ocrText.strip())
+
+							log.debug(f"LINE: copy-read popup OCR: {ocrText!r}")
+							if ocrText and "複製" in ocrText:
+								lines = ocrText.split("\n")
+								targetLineIdx = -1
+								for li, line in enumerate(lines):
+									if "複製" in line:
+										targetLineIdx = li
+										break
+								if targetLineIdx >= 0:
+									nItems = len(menuItems)
+									itemIdx = min(targetLineIdx, nItems - 1)
+									copyItem = menuItems[itemIdx][0]
+									log.info(
+										f"LINE: copy-read matched '複製' via popup OCR, "
+										f"line {targetLineIdx} → item {itemIdx}/{nItems}"
+									)
+				except Exception as e:
+					log.debug(f"LINE: copy-read popup OCR failed: {e}", exc_info=True)
+
+			# If still no match, check if we got the wrong menu (全選)
+			if not copyItem:
+				isSelectAll = len(menuItems) <= 2
+				if isSelectAll and posIdx >= 1:
+					# Wrong menu seen twice, skip to OCR
+					log.info("LINE: copy-read '全選' menu seen twice, skipping to OCR")
+					_dismissMenu()
+					core.callLater(300, lambda: _attemptCopyAtOffset(len(clickPositions)))
+					return
+				# Wrong menu or OCR couldn't find 複製, try next position
+				log.info(f"LINE: copy-read '複製' not found at [{clickPositions[posIdx][2]}]")
+				_dismissMenu()
+				core.callLater(300, lambda: _attemptCopyAtOffset(posIdx + 1))
+				return
+
+			# Click the Copy item
+			iRect = copyItem.CurrentBoundingRectangle
+			itemCx = int((iRect.left + iRect.right) / 2)
+			itemCy = int((iRect.top + iRect.bottom) / 2)
+			log.info(f"LINE: copy-read clicking '複製' at ({itemCx}, {itemCy})")
+			ctypes.windll.user32.SetCursorPos(itemCx, itemCy)
+			time.sleep(0.05)
+			ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # LEFTDOWN
+			time.sleep(0.05)
+			ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # LEFTUP
+
+			# Wait for clipboard to update, then read
+			core.callLater(200, _readClipboardAndSpeak)
+
+		except Exception as e:
+			log.debug(f"LINE: copy-read menu detection failed: {e}", exc_info=True)
+			_dismissMenu()
+			_restoreClipboard(origClip)
+			_ocrReadMessageFallback(targetElement)
+
+	def _readClipboardAndSpeak():
+		"""Read clipboard content and speak it."""
+		try:
+			clipText = api.getClipData()
+		except Exception:
+			clipText = ""
+
+		if clipText and clipText.strip():
+			log.info(f"LINE: copy-read success: {clipText!r}")
+			speech.cancelSpeech()
+			ui.message(clipText.strip())
+			_restoreClipboard(origClip)
+		else:
+			log.info("LINE: copy-read clipboard empty, falling back to OCR")
+			_restoreClipboard(origClip)
+			_ocrReadMessageFallback(targetElement)
+
+	def _dismissMenu():
+		"""Send Escape to dismiss context menu."""
+		try:
+			from keyboardHandler import KeyboardInputGesture
+			KeyboardInputGesture.fromName("escape").send()
+		except Exception:
+			pass
+
+	def _restoreClipboard(original):
+		"""Restore the original clipboard content."""
+		try:
+			if original is not None:
+				api.copyToClip(original)
+		except Exception:
+			pass
+
+	# Start the copy-read process
+	_attemptCopyAtOffset(0)
+
+
+def _ocrReadMessageFallback(targetElement):
+	"""Fall back to OCR for reading a message, with ocr.wav sound alert.
+
+	Plays ocr.wav to indicate the result may not be 100% accurate,
+	then reads the element text via OCR.
+	"""
+	try:
+		nvwave.playWaveFile(_OCR_SOUND_PATH, asynchronous=True)
+	except Exception:
+		log.debugWarning("Failed to play OCR sound", exc_info=True)
+	_ocrReadElementText(targetElement)
 
 
 class LineChatListItem(UIA):

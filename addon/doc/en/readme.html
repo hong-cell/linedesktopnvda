@@ -33,6 +33,21 @@ Some features in this add-on rely on OCR (Optical Character Recognition), so the
 </li>
 <li><strong>Pre-check</strong>: Before sending a message or making a call, always check the chat history to ensure you are contacting the right person.</li>
 </ul>
+<h2>Message Reading and Copying</h2>
+<ul>
+<li><strong>Reading Messages</strong>: When navigating through the message list, the add-on uses a "copy-first" approach to read messages. It automatically right-clicks the message → selects "Copy" → reads the clipboard content. The original clipboard content is restored after reading.</li>
+<li><strong>Copying Messages</strong>: Press <code>Control+C</code> in the message list, and the add-on will copy the message text to the clipboard via the right-click context menu.</li>
+<li><strong>OCR Fallback</strong>: If copying via the context menu fails (e.g., the menu or menu item cannot be found), the add-on will automatically fall back to OCR (Optical Character Recognition) to read the message content.</li>
+</ul>
+<h3>Sound Effects</h3>
+<ul>
+<li><strong>Default (Copy Success)</strong>: If the message is read via the context menu copy method, no special sound effect is played.</li>
+<li><strong>OCR Fallback Sound</strong>: If the message is read via OCR, the <code>ocr.wav</code> sound effect will be played to indicate that the content may not be fully accurate.</li>
+</ul>
+<blockquote>
+<p>[!WARNING]
+OCR (Optical Character Recognition) results are <strong>not 100% accurate</strong>. If you hear the <code>ocr.wav</code> sound effect, be aware that the text may differ from the actual message content. To verify the exact content, it is recommended to check the message on your phone or another platform.</p>
+</blockquote>
 <h2>Keyboard Shortcuts</h2>
 <blockquote>
 <p>[!NOTE]
