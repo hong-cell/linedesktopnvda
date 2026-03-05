@@ -1463,19 +1463,31 @@ def _copyAndReadMessage(targetElement):
 	elRight = int(rect.right)
 	elTop = int(rect.top)
 	elBottom = int(rect.bottom)
+	elWidth = elRight - elLeft
 	clampedCenter = max(winTop + 10, min(cy, winBottom - 10))
 	clampedTop = max(elTop + 2, winTop + 10)
 	clampedBottom = min(elBottom - 2, winBottom - 10)
-	leftThird = elLeft + (elRight - elLeft) // 3
-	rightThird = elLeft + 2 * (elRight - elLeft) // 3
+
+	# The UIA element spans the full chat area width, but the actual
+	# message bubble is narrower — left-aligned (received) or
+	# right-aligned (sent).  Use narrow increments to target bubbles.
+	# Positions at 1/6 and 5/6 hit the typical bubble centers;
+	# 1/4 and 3/4 cover wider bubbles; center is last resort.
+	pos_1_6 = elLeft + elWidth // 6
+	pos_5_6 = elLeft + 5 * elWidth // 6
+	pos_1_4 = elLeft + elWidth // 4
+	pos_3_4 = elLeft + 3 * elWidth // 4
 
 	clickPositions = [
+		(pos_1_6, clampedCenter, "1/6-left"),
+		(pos_5_6, clampedCenter, "5/6-right"),
+		(pos_1_4, clampedCenter, "1/4-left"),
+		(pos_3_4, clampedCenter, "3/4-right"),
 		(cx, clampedCenter, "center"),
-		(rightThird, clampedCenter, "right-third"),
-		(leftThird, clampedCenter, "left-third"),
-		(cx, clampedTop, "top"),
-		(cx, clampedBottom, "bottom"),
+		(pos_1_6, clampedTop, "1/6-top"),
+		(pos_5_6, clampedBottom, "5/6-bottom"),
 	]
+	selectAllCount = [0]  # mutable counter for ≤2-item menus
 
 	def _attemptCopyAtOffset(posIdx=0):
 		"""Right-click at clickPositions[posIdx] and try to copy."""
@@ -1660,6 +1672,7 @@ def _copyAndReadMessage(targetElement):
 					break
 
 			# Strategy 2: OCR the popup when UIA text is all empty
+			popupOcrText = ""
 			if not copyItem and menuItems and len(menuItems) >= 3:
 				log.debug("LINE: copy-read no UIA text, trying popup OCR")
 				try:
@@ -1737,6 +1750,7 @@ def _copyAndReadMessage(targetElement):
 								ocrText = getattr(result, 'text', '') or ''
 								ocrText = _removeCJKSpaces(ocrText.strip())
 
+							popupOcrText = ocrText
 							log.debug(f"LINE: copy-read popup OCR: {ocrText!r}")
 							if ocrText and "複製" in ocrText:
 								lines = ocrText.split("\n")
@@ -1756,12 +1770,60 @@ def _copyAndReadMessage(targetElement):
 				except Exception as e:
 					log.debug(f"LINE: copy-read popup OCR failed: {e}", exc_info=True)
 
-			# If still no match, check if we got the wrong menu (全選)
+			# If still no match, check if we got the wrong menu
 			if not copyItem:
 				isSelectAll = len(menuItems) <= 2
-				if isSelectAll and posIdx >= 1:
-					# Wrong menu seen twice, skip to OCR
-					log.info("LINE: copy-read '全選' menu seen twice, skipping to OCR")
+				if isSelectAll:
+					selectAllCount[0] += 1
+				if isSelectAll and selectAllCount[0] >= 3:
+					# Wrong menu (≤2 items) seen at 3+ positions
+					# — bail to OCR.
+					log.info(
+						f"LINE: copy-read wrong menu (≤2 items) "
+						f"seen {selectAllCount[0]} times, last at "
+						f"[{clickPositions[posIdx][2]}], "
+						f"skipping to OCR"
+					)
+					_dismissMenu()
+					core.callLater(300, lambda: _attemptCopyAtOffset(len(clickPositions)))
+					return
+				if len(menuItems) >= 3:
+					# Got a correct context menu (≥3 items)
+					# but 複製 isn't in it.
+					# Check if this is a self-sent message:
+					# right-clicking on the bubble edge (not
+					# the text) gives a menu with 收回 but
+					# no 複製. Try other positions first.
+					ocrHasRecall = (
+						popupOcrText
+						and "收回" in popupOcrText
+					)
+					if ocrHasRecall:
+						log.info(
+							f"LINE: copy-read self-sent "
+							f"message edge hit "
+							f"({len(menuItems)} items, "
+							f"has 收回 but no 複製) at "
+							f"[{clickPositions[posIdx][2]}]"
+							f", trying next position"
+						)
+						_dismissMenu()
+						core.callLater(
+							300,
+							lambda: _attemptCopyAtOffset(
+								posIdx + 1
+							),
+						)
+						return
+					# No 收回 either — this message type
+					# doesn't support copy (sticker/image).
+					# Bail immediately to content OCR.
+					log.info(
+						f"LINE: copy-read correct menu "
+						f"({len(menuItems)} items) but no "
+						f"'複製' at [{clickPositions[posIdx][2]}]"
+						f", skipping to OCR"
+					)
 					_dismissMenu()
 					core.callLater(300, lambda: _attemptCopyAtOffset(len(clickPositions)))
 					return
@@ -4399,6 +4461,7 @@ class AppModule(appModuleHandler.AppModule):
 			return
 		# Check if the currently focused UIA element is the message input
 		isMessageInput = False
+		hadTextBeforeEnter = False
 		try:
 			handler = UIAHandler.handler
 			if handler:
@@ -4410,12 +4473,20 @@ class AppModule(appModuleHandler.AppModule):
 						log.debug(f"LINE Enter key: edit field label={label!r}")
 						if label == _("Message input"):
 							isMessageInput = True
+							try:
+								preVal = rawElement.GetCurrentPropertyValue(30045)  # ValueValue
+								log.debug(f"LINE pre-Enter value: {preVal!r}")
+								if preVal and isinstance(preVal, str) and preVal.strip():
+									hadTextBeforeEnter = True
+							except Exception:
+								log.debugWarning("Failed to read pre-Enter value", exc_info=True)
 		except Exception:
 			log.debugWarning("Error detecting message input for send sound", exc_info=True)
 		# Pass Enter key through to LINE
 		gesture.send()
-		# After Enter, schedule a delayed check to see if message was actually sent
-		if isMessageInput:
+		# After Enter, schedule a delayed check only when there was text before Enter.
+		# This prevents empty input Enter from incorrectly playing the send sound.
+		if isMessageInput and hadTextBeforeEnter:
 			def _checkFieldAndPlaySound():
 				try:
 					handler = UIAHandler.handler
@@ -4448,6 +4519,8 @@ class AppModule(appModuleHandler.AppModule):
 					log.debugWarning("Error in delayed send sound check", exc_info=True)
 			# Wait 300ms for LINE to process the Enter key
 			core.callLater(300, _checkFieldAndPlaySound)
+		elif isMessageInput:
+			log.debug("LINE: Enter on empty message input, skipping send sound")
 
 	# ── Right-click context menu actions ─────────────────────────────────
 
@@ -4492,6 +4565,21 @@ class AppModule(appModuleHandler.AppModule):
 		except Exception as e:
 			log.debug(f"LINE: _getMessageCenter failed: {e}")
 			return None
+
+	# Reference offsets from right-click point to each context menu item
+	# center, measured at 100% DPI (1920x1080, 17-inch screen).
+	# Message at (697, 255); menu items at:
+	#   複製 (715, 288) → offset (+18, +33)
+	#   分享 (714, 323) → offset (+17, +68)
+	#   收回 (720, 350) → offset (+23, +95)
+	#   回覆 (647, 359) → offset (-50, +104)
+	# At runtime these are scaled by _getDpiScale().
+	_MENU_OFFSETS = {
+		"複製": (18, 33),
+		"分享": (17, 68),
+		"收回": (23, 95),
+		"回覆": (-50, 104),
+	}
 
 	def _contextMenuAction(self, itemIndex, actionName, afterCallback=None):
 		"""Right-click current message and select an item from the context menu.
@@ -4567,19 +4655,24 @@ class AppModule(appModuleHandler.AppModule):
 			time.sleep(0.05)
 		log.debug("LINE: modifiers released, proceeding with right-click")
 
-		# The UIA element spans the full chat area width, but the
-		# actual message bubble is narrower and aligned left (received)
-		# or right (sent).  Clicking at the horizontal center often
-		# lands on empty space, producing the wrong "全選" menu.
-		# Try left-third and right-third to target the actual bubble.
-		leftThird = elLeft + (elRight - elLeft) // 3
-		rightThird = elLeft + 2 * (elRight - elLeft) // 3
+		# The UIA element spans the full chat area width, but the actual
+		# message bubble is narrower — left-aligned (received) or
+		# right-aligned (sent).  Use narrow increments to target bubbles.
+		# Positions at 1/6 and 5/6 hit the typical bubble centers;
+		# 1/4 and 3/4 cover wider bubbles; center is last resort.
+		elWidth = elRight - elLeft
+		pos_1_6 = elLeft + elWidth // 6
+		pos_5_6 = elLeft + 5 * elWidth // 6
+		pos_1_4 = elLeft + elWidth // 4
+		pos_3_4 = elLeft + 3 * elWidth // 4
 		clickPositions = [
+			(pos_1_6, clampedCenter, "1/6-left"),
+			(pos_5_6, clampedCenter, "5/6-right"),
+			(pos_1_4, clampedCenter, "1/4-left"),
+			(pos_3_4, clampedCenter, "3/4-right"),
 			(cx, clampedCenter, "center"),
-			(rightThird, clampedCenter, "right-third"),
-			(leftThird, clampedCenter, "left-third"),
-			(cx, clampedTop, "top"),
-			(cx, clampedBottom, "bottom"),
+			(pos_1_6, clampedTop, "1/6-top"),
+			(pos_5_6, clampedBottom, "5/6-bottom"),
 		]
 
 		appModRef = self
@@ -4980,6 +5073,8 @@ class AppModule(appModuleHandler.AppModule):
 							break
 
 					# Strategy 2: OCR the entire popup window
+					# Run OCR BEFORE offset matching to verify the
+					# menu actually contains the target action.
 					if not targetItem and menuItems:
 						log.debug(
 							"LINE: no UIA text match, "
@@ -5051,6 +5146,59 @@ class AppModule(appModuleHandler.AppModule):
 								f"LINE: popup OCR failed: {e}"
 							)
 
+					# Strategy 1.5: Offset-based position matching
+					# Use reference offsets from the right-click point
+					# to estimate which menu item is the target,
+					# verified against actual UIA bounding rects.
+					# Only if OCR confirmed the action is in the menu.
+					if (
+						not targetItem
+						and menuItems
+						and len(menuItems) >= 3
+						and actionName in appModRef._MENU_OFFSETS
+						and popupOcrResult
+						and actionName in popupOcrResult
+					):
+						dx, dy = appModRef._MENU_OFFSETS[actionName]
+						scale = _getDpiScale(hwnd)
+						offsetX = clickX + int(dx * scale)
+						offsetY = clickY + int(dy * scale)
+						log.debug(
+							f"LINE: trying offset-based match "
+							f"for '{actionName}': click=("
+							f"{clickX},{clickY}) + "
+							f"offset({dx},{dy})*{scale:.2f} "
+							f"= ({offsetX},{offsetY})"
+						)
+						for item, text in menuItems:
+							try:
+								iR = (
+									item
+									.CurrentBoundingRectangle
+								)
+								if (
+									iR.left <= offsetX
+									<= iR.right
+									and iR.top <= offsetY
+									<= iR.bottom
+								):
+									targetItem = item
+									log.info(
+										f"LINE: matched "
+										f"'{actionName}' by "
+										f"offset at "
+										f"({offsetX},"
+										f"{offsetY}) "
+										f"within rect "
+										f"({iR.left},"
+										f"{iR.top})-"
+										f"({iR.right},"
+										f"{iR.bottom})"
+									)
+									break
+							except Exception:
+								pass
+
 					if targetItem:
 						# Click the target item
 						iRect = targetItem.CurrentBoundingRectangle
@@ -5098,22 +5246,21 @@ class AppModule(appModuleHandler.AppModule):
 						KeyboardInputGesture.fromName(
 							"escape"
 						).send()
-						# For copy: if we got "全選" (2-item
-						# menu = clicked empty space), try
-						# just 1 more position then OCR.
-						# This avoids wasting ~4s on short
-						# msgs where every position misses.
+						# Got wrong menu (≤2 items = 全選 or
+						# 背景設定).  If seen at 2+ positions,
+						# bail; otherwise try next position.
 						isSelectAll = (
 							len(menuItems) <= 2
 						)
 						if (
-							actionName == "複製"
-							and isSelectAll
+							isSelectAll
 							and posIdx >= 1
 						):
 							log.info(
-								"LINE: '全選' menu seen "
-								"twice, skipping to OCR"
+								f"LINE: wrong menu (≤2)"
+								f" seen again at"
+								f" [{posLabel}],"
+								f" skipping to end"
 							)
 							core.callLater(
 								300,
