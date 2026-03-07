@@ -16,7 +16,9 @@ addonHandler.initTranslation()
 def _getLineAppModule():
 	"""Find and return the LINE appModule instance, or None."""
 	for app in appModuleHandler.runningTable.values():
-		if app and getattr(app, 'appName', '').lower() in ('line', 'line_app'):
+		if app and getattr(app, 'appName', '').lower() in (
+			'line', 'line_app', 'linecall',
+		):
 			return app
 	return None
 
@@ -39,6 +41,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		"Line",
 		"LINE_APP",
 		"LineCall",
+		"linecall",
 	]
 
 	def __init__(self, *args, **kwargs):

@@ -3818,7 +3818,9 @@ class AppModule(appModuleHandler.AppModule):
 	def _ocrFindButtonKeyword(self, hwnd, keywords):
 		"""Use OCR to check if any keyword appears in the call window.
 		
-		Returns True if a keyword is found, False otherwise.
+		Returns (matched: bool, ocrText: str) tuple.
+		  matched = True if any keyword is found in the OCR text.
+		  ocrText = the raw OCR text (for further analysis by caller).
 		Note: NVDA's uwpOcr result only provides flat text,
 		not per-word positions, so we just confirm presence.
 		"""
@@ -3826,7 +3828,7 @@ class AppModule(appModuleHandler.AppModule):
 			ocrText = self._ocrWindowArea(hwnd, sync=True, timeout=3.0)
 			if not ocrText:
 				log.info("LINE: OCR returned no text for call window")
-				return False
+				return (False, "")
 			
 			ocrTextLower = ocrText.lower()
 			log.info(
@@ -3835,16 +3837,56 @@ class AppModule(appModuleHandler.AppModule):
 			for kw in keywords:
 				if kw.lower() in ocrTextLower:
 					log.info(f"LINE: OCR found keyword '{kw}'")
-					return True
+					return (True, ocrText)
 			
 			log.info("LINE: OCR no keyword match")
-			return False
+			return (False, ocrText)
 		except Exception as e:
 			log.debug(
 				f"LINE: _ocrFindButtonKeyword failed: {e}",
 				exc_info=True
 			)
-			return False
+			return (False, "")
+	
+	_VIDEO_KEYWORDS = ["視訊", "video", "ビデオ", "วิดีโอ"]
+
+	def _isVideoCallWindow(self, hwnd, ocrText=None):
+		"""Check if the call window is a video call (vs voice call).
+		
+		First checks window title (fast). If title is generic (e.g.
+		"LineCall"), falls back to checking the provided ocrText,
+		or performs OCR if no ocrText is given.
+		"""
+		import ctypes
+		buf = ctypes.create_unicode_buffer(512)
+		ctypes.windll.user32.GetWindowTextW(hwnd, buf, 512)
+		title = (buf.value or "").lower()
+		isVideo = any(kw in title for kw in self._VIDEO_KEYWORDS)
+		if isVideo:
+			log.debug(f"LINE: _isVideoCallWindow title={title!r} → True")
+			return True
+		
+		# Title is generic (e.g. "LineCall") — check OCR text
+		if ocrText is None:
+			# Perform a quick OCR to check
+			try:
+				ocrText = self._ocrWindowArea(
+					hwnd, sync=True, timeout=2.0
+				) or ""
+			except Exception:
+				ocrText = ""
+		
+		if ocrText:
+			ocrLower = ocrText.lower()
+			isVideo = any(kw in ocrLower for kw in self._VIDEO_KEYWORDS)
+			log.debug(
+				f"LINE: _isVideoCallWindow title={title!r}, "
+				f"ocrCheck → {isVideo}"
+			)
+			return isVideo
+		
+		log.debug(f"LINE: _isVideoCallWindow title={title!r} → False")
+		return False
 	
 	def _answerIncomingCall(self, hwnd):
 		"""Answer an incoming call by clicking the answer (green) button.
@@ -3872,6 +3914,7 @@ class AppModule(appModuleHandler.AppModule):
 		winW = rect.right - rect.left
 		winH = rect.bottom - rect.top
 		
+		isVideoCall = self._isVideoCallWindow(hwnd)
 		allElements, handler, rootEl = self._getCallButtonElements(hwnd)
 		
 		# Strategy 1: UIA keyword search
@@ -3886,10 +3929,12 @@ class AppModule(appModuleHandler.AppModule):
 					return True
 		
 		# Strategy 2: UIA bounding-rect analysis (inside window only)
-		# In LINE's call popup, answer (green) is on the LEFT
+		# Voice call popup: answer (green) on the LEFT
+		# Video call popup: answer (green camera) on the RIGHT
 		if allElements:
+			btnSide = "right" if isVideoCall else "left"
 			result = self._findCallButtonByRect(
-				hwnd, allElements, side="left"
+				hwnd, allElements, side=btnSide
 			)
 			if result:
 				el, cx, cy = result
@@ -3918,16 +3963,30 @@ class AppModule(appModuleHandler.AppModule):
 		
 		# Strategy 3: OCR confirms call window, then click at position
 		log.info("LINE: trying OCR to confirm call window")
-		ocrConfirmed = self._ocrFindButtonKeyword(
+		ocrConfirmed, ocrText = self._ocrFindButtonKeyword(
 			hwnd,
 			["接聽", "accept", "answer", "応答", "รับสาย",
 			 "拒絕", "decline", "reject", "來電"]
 		)
 		
+		# Re-check video call status using OCR text
+		# (window title may be generic like "LineCall")
+		if not isVideoCall and ocrText:
+			isVideoCall = self._isVideoCallWindow(hwnd, ocrText=ocrText)
+			if isVideoCall:
+				log.info(
+					"LINE: OCR confirms this is a VIDEO call, "
+					"adjusting click position"
+				)
+		
 		# Strategy 4: Click at position inside the window
 		# Screenshot layout: [avatar][caller text][red reject ~80%][green answer ~92%]
 		# Answer (green phone) is the RIGHTMOST button
-		if winH > 200:
+		if isVideoCall:
+			# Video call: answer (green camera) at top-right
+			answerX = rect.left + int(winW * 0.92)
+			answerY = rect.top + int(winH * 0.08)
+		elif winH > 200:
 			# Full call window — answer button
 			answerX = rect.left + int(winW * 0.65)
 			answerY = rect.top + int(winH * 0.75)
@@ -3939,7 +3998,8 @@ class AppModule(appModuleHandler.AppModule):
 		
 		log.info(
 			f"LINE: clicking answer (fallback) at "
-			f"({answerX}, {answerY}), winRect=({rect.left},"
+			f"({answerX}, {answerY}), isVideo={isVideoCall}, "
+			f"winRect=({rect.left},"
 			f"{rect.top},{rect.right},{rect.bottom})"
 		)
 		self._clickAtPosition(answerX, answerY)
@@ -3972,6 +4032,7 @@ class AppModule(appModuleHandler.AppModule):
 		winW = rect.right - rect.left
 		winH = rect.bottom - rect.top
 		
+		isVideoCall = self._isVideoCallWindow(hwnd)
 		allElements, handler, rootEl = self._getCallButtonElements(hwnd)
 		
 		# Strategy 1: UIA keyword search
@@ -3986,10 +4047,12 @@ class AppModule(appModuleHandler.AppModule):
 					return True
 		
 		# Strategy 2: UIA bounding-rect analysis (inside window only)
-		# In LINE's call popup, reject (red) is on the RIGHT
+		# Voice call popup: reject (red) on the RIGHT
+		# Video call popup: reject (red) on the LEFT of the answer button
 		if allElements:
+			btnSide = "left" if isVideoCall else "right"
 			result = self._findCallButtonByRect(
-				hwnd, allElements, side="right"
+				hwnd, allElements, side=btnSide
 			)
 			if result:
 				el, cx, cy = result
@@ -4018,16 +4081,29 @@ class AppModule(appModuleHandler.AppModule):
 		
 		# Strategy 3: OCR confirms call window, then click at position
 		log.info("LINE: trying OCR to confirm call window")
-		ocrConfirmed = self._ocrFindButtonKeyword(
+		ocrConfirmed, ocrText = self._ocrFindButtonKeyword(
 			hwnd,
 			["拒絕", "decline", "reject", "拒否", "ปฏิเสธ",
 			 "接聽", "accept", "answer", "來電"]
 		)
 		
+		# Re-check video call status using OCR text
+		if not isVideoCall and ocrText:
+			isVideoCall = self._isVideoCallWindow(hwnd, ocrText=ocrText)
+			if isVideoCall:
+				log.info(
+					"LINE: OCR confirms this is a VIDEO call, "
+					"adjusting click position"
+				)
+		
 		# Strategy 4: Click at position inside the window
 		# Screenshot layout: [avatar][caller text][red reject ~80%][green answer ~92%]
 		# Reject (red phone) is second from right
-		if winH > 200:
+		if isVideoCall:
+			# Video call: decline (red) at top-right area, left of answer
+			rejectX = rect.left + int(winW * 0.80)
+			rejectY = rect.top + int(winH * 0.08)
+		elif winH > 200:
 			# Full call window — decline button
 			rejectX = rect.left + int(winW * 0.35)
 			rejectY = rect.top + int(winH * 0.75)
@@ -4039,7 +4115,8 @@ class AppModule(appModuleHandler.AppModule):
 		
 		log.info(
 			f"LINE: clicking reject (fallback) at "
-			f"({rejectX}, {rejectY}), winRect=({rect.left},"
+			f"({rejectX}, {rejectY}), isVideo={isVideoCall}, "
+			f"winRect=({rect.left},"
 			f"{rect.top},{rect.right},{rect.bottom})"
 		)
 		self._clickAtPosition(rejectX, rejectY)
@@ -5399,6 +5476,167 @@ class AppModule(appModuleHandler.AppModule):
 		"""User pressed N to cancel message recall."""
 		self._endRecallConfirmation(False)
 
+	def script_toggleMicAndAnnounce(self, gesture):
+		"""Pass Ctrl+Shift+A to LINE, then OCR the call window to announce mic status."""
+		# Always pass the gesture through first
+		gesture.send()
+
+		import ctypes
+		import ctypes.wintypes
+		import os
+		import threading
+
+		# LINE executable names
+		_LINE_EXES = {"line.exe", "line_app.exe", "linecall.exe", "linelauncher.exe"}
+
+		def _isLineProcess(pid):
+			"""Check if a PID belongs to a LINE process."""
+			if pid == self.processID:
+				return True
+			try:
+				PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+				hProc = ctypes.windll.kernel32.OpenProcess(
+					PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+				)
+				if hProc:
+					try:
+						buf = ctypes.create_unicode_buffer(260)
+						size = ctypes.wintypes.DWORD(260)
+						ok = ctypes.windll.kernel32.QueryFullProcessImageNameW(
+							hProc, 0, buf, ctypes.byref(size)
+						)
+						if ok:
+							exeName = os.path.basename(buf.value).lower()
+							return exeName in _LINE_EXES
+					finally:
+						ctypes.windll.kernel32.CloseHandle(hProc)
+			except Exception:
+				pass
+			return False
+
+		# ── Find the call window ──────────────────────────────────
+		# Strategy: check foreground window FIRST, because during an
+		# active video call the call window IS the foreground, and
+		# _findIncomingCallWindow() may skip it or pick a wrong overlay.
+		hwnd = None
+		mainHwnd = None
+		try:
+			mainHwnd = self.windowHandle
+		except Exception:
+			pass
+
+		fgHwnd = ctypes.windll.user32.GetForegroundWindow()
+		if fgHwnd and fgHwnd != mainHwnd:
+			fgPid = ctypes.wintypes.DWORD()
+			ctypes.windll.user32.GetWindowThreadProcessId(
+				fgHwnd, ctypes.byref(fgPid)
+			)
+			if _isLineProcess(fgPid.value):
+				hwnd = fgHwnd
+				log.info(
+					f"LINE: mic status using foreground window "
+					f"as call window: hwnd={fgHwnd}"
+				)
+
+		# Fallback to _findIncomingCallWindow
+		if not hwnd:
+			hwnd = self._findIncomingCallWindow()
+
+		if not hwnd:
+			# Not in a call, just let the keystroke go through silently
+			return
+
+		appModRef = self
+
+		def _checkMicStatus():
+			"""After a short delay, OCR the call window to detect mic status.
+
+			For video calls, LINE auto-hides the control bar. We move the
+			mouse into the window to trigger it to appear, then OCR.
+			"""
+			import time
+
+			try:
+				rect = ctypes.wintypes.RECT()
+				ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+				winW = rect.right - rect.left
+				winH = rect.bottom - rect.top
+
+				if winW <= 0 or winH <= 0:
+					return
+
+				# Save original mouse position
+				origPt = ctypes.wintypes.POINT()
+				ctypes.windll.user32.GetCursorPos(ctypes.byref(origPt))
+
+				# Move mouse to bottom-center of the call window.
+				# This triggers LINE's auto-hiding control bar in video calls.
+				# For voice calls, controls are always visible so this is harmless.
+				centerX = (rect.left + rect.right) // 2
+				bottomY = rect.top + int(winH * 0.80)
+				ctypes.windll.user32.SetCursorPos(centerX, bottomY)
+
+				# Wait for controls to appear + mic toggle animation
+				time.sleep(0.8)
+
+				# Re-read window rect (may have changed)
+				ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+				winW = rect.right - rect.left
+				winH = rect.bottom - rect.top
+
+				# Attempt 1: OCR bottom 30% (standard for voice calls)
+				bottomRegion = (
+					int(rect.left),
+					int(rect.top + int(winH * 0.70)),
+					winW,
+					int(winH * 0.30),
+				)
+				ocrText = appModRef._ocrWindowArea(
+					hwnd, region=bottomRegion, sync=True, timeout=3.0
+				)
+				ocrText = ocrText.strip() if ocrText else ""
+
+				if ocrText:
+					log.info(f"LINE: mic status OCR (bottom 30%): {ocrText!r}")
+					if _announceMicFromOcr(ocrText):
+						ctypes.windll.user32.SetCursorPos(origPt.x, origPt.y)
+						return
+
+				# Attempt 2: OCR entire window (video call controls
+				# may appear in the center or as an overlay)
+				ocrText = appModRef._ocrWindowArea(
+					hwnd, sync=True, timeout=3.0
+				)
+				ocrText = ocrText.strip() if ocrText else ""
+
+				# Restore mouse position
+				ctypes.windll.user32.SetCursorPos(origPt.x, origPt.y)
+
+				if ocrText:
+					log.info(f"LINE: mic status OCR (full window): {ocrText!r}")
+					_announceMicFromOcr(ocrText)
+				else:
+					log.debug("LINE: mic status OCR returned empty")
+
+			except Exception as e:
+				log.debug(f"LINE: mic status check failed: {e}", exc_info=True)
+
+		def _announceMicFromOcr(ocrText):
+			"""Detect mic on/off from OCR text and announce. Returns True if detected."""
+			import wx
+			if any(kw in ocrText for kw in ["關麥克風", "關閉麥克風", "Mute", "mute"]):
+				wx.CallAfter(ui.message, "麥克風已開啟")
+				return True
+			elif any(kw in ocrText for kw in ["開麥克風", "開啟麥克風", "Unmute", "unmute"]):
+				wx.CallAfter(ui.message, "麥克風已關閉")
+				return True
+			else:
+				log.debug(f"LINE: mic status not detected in OCR: {ocrText!r}")
+				return False
+
+		t = threading.Thread(target=_checkMicStatus, daemon=True)
+		t.start()
+
 	__gestures = {
 		"kb:tab": "navigateAndTrack",
 		"kb:shift+tab": "navigateAndTrack",
@@ -5411,4 +5649,5 @@ class AppModule(appModuleHandler.AppModule):
 		"kb:control+2": "switchTabAndAnnounce",
 		"kb:control+3": "switchTabAndAnnounce",
 		"kb:enter": "sendMessageAndPlaySound",
+		"kb:control+shift+a": "toggleMicAndAnnounce",
 	}
