@@ -57,6 +57,7 @@
 | **NVDA+Windows+A** | アドオン | 着信に応答 |
 | **NVDA+Windows+D** | アドオン | 着信を拒否 |
 | **NVDA+Windows+S** | アドオン | 発信者を確認 |
+| **NVDA+Windows+F** | アドオン | 通話ウィンドウにフォーカス |
 | **Ctrl+Shift+A** | LINE | マイクのオン／オフ |
 | **Ctrl+Shift+V** | LINE | カメラのオン／オフ |
 
@@ -93,6 +94,7 @@
 
 | ショートカット | カテゴリ | 操作 |
 |---|---|---|
+| **NVDA+Windows+O** | アドオン | その他のオプションボタンをクリック |
 | **Shift+Enter** | LINE | 改行 |
 | **Ctrl+F** | LINE | 検索 |
 | **Ctrl+N** | LINE | ノートを開く |

@@ -1113,8 +1113,9 @@ def _detectEditFieldLabel(element, handler):
 
 	Checks for:
 	1. Login context (>=2 sibling edit controls) → 'Email' / 'Password'
-	2. Search field (placeholder text or position in left sidebar) → 'Search chat rooms'
-	3. Message input (placeholder text or position in right/bottom area) → 'Message input'
+	2. Notes search field (window title contains notes keywords) → 'Search notes content'
+	3. Search field (placeholder text or position in left sidebar) → 'Search chat rooms'
+	4. Message input (placeholder text or position in right/bottom area) → 'Message input'
 
 	Returns the label string, or '' if the field cannot be identified.
 	"""
@@ -1164,6 +1165,150 @@ def _detectEditFieldLabel(element, handler):
 			# Translators: Generic label for a login field when position cannot be determined
 			return _("Login field")
 
+		# --- Check window title to detect notes context ---
+		windowTitle = ""
+		try:
+			hwnd = ctypes.windll.user32.GetForegroundWindow()
+			if hwnd:
+				buf = ctypes.create_unicode_buffer(512)
+				ctypes.windll.user32.GetWindowTextW(hwnd, buf, 512)
+				windowTitle = (buf.value or "").lower()
+		except Exception:
+			pass
+
+		# Notes window keywords (check for notes/Keep in window title)
+		NOTES_KEYWORDS = ("記事本", "note", "keep", "ノート", "บันทึก", "노트")
+		isNotesWindow = any(kw in windowTitle for kw in NOTES_KEYWORDS)
+
+		# Additional check 1: Walk UIA ancestors to find notes keywords in element names
+		# The notes panel often has a parent/ancestor element whose name contains notes text.
+		if not isNotesWindow:
+			try:
+				ancestor = element
+				for _depth in range(5):
+					ancestor = walker.GetParentElement(ancestor)
+					if not ancestor:
+						break
+					try:
+						ancestorName = ancestor.CurrentName
+						if ancestorName and isinstance(ancestorName, str):
+							ancestorNameLower = ancestorName.strip().lower()
+							if any(kw in ancestorNameLower for kw in NOTES_KEYWORDS):
+								isNotesWindow = True
+								log.info(f"LINE: Detected notes window via UIA ancestor name: {ancestorName!r}")
+								break
+					except Exception:
+						continue
+			except Exception:
+				log.debug("LINE: UIA ancestor notes detection failed", exc_info=True)
+		
+		# Additional check 2: Use OCR on the top area to detect notes tabs/header
+		if not isNotesWindow:
+			try:
+				hwnd = ctypes.windll.user32.GetForegroundWindow()
+				if hwnd:
+					# Get window rect
+					wndRect = ctypes.wintypes.RECT()
+					ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(wndRect))
+					winWidth = wndRect.right - wndRect.left
+					winHeight = wndRect.bottom - wndRect.top
+					
+					log.debug(f"LINE: Attempting OCR notes detection, window size: {winWidth}x{winHeight}")
+					
+					if winWidth > 0 and winHeight > 0:
+						# OCR the full-width top area (100% width, top 20%)
+						# to capture notes header/title that may appear anywhere
+						ocrWidth = winWidth
+						ocrHeight = int(winHeight * 0.20)
+						ocrLeft = wndRect.left
+						ocrTop = wndRect.top
+						
+						log.debug(f"LINE: OCR region: left={ocrLeft}, top={ocrTop}, width={ocrWidth}, height={ocrHeight}")
+						
+						# Quick OCR check
+						import screenBitmap
+						from contentRecog import uwpOcr
+						
+						langs = uwpOcr.getLanguages()
+						if langs:
+							ocrLang = None
+							for candidate in ["zh-Hant-TW", "zh-TW", "zh-Hant"]:
+								if candidate in langs:
+									ocrLang = candidate
+									break
+							if not ocrLang:
+								for lang in langs:
+									if lang.startswith("zh"):
+										ocrLang = lang
+										break
+							if not ocrLang:
+								ocrLang = langs[0]
+							
+							log.debug(f"LINE: Using OCR language: {ocrLang}")
+							
+							sb = screenBitmap.ScreenBitmap(ocrWidth, ocrHeight)
+							pixels = sb.captureImage(ocrLeft, ocrTop, ocrWidth, ocrHeight)
+							
+							recognizer = uwpOcr.UwpOcr(language=ocrLang)
+							
+							# Synchronous OCR for quick detection
+							import threading
+							resultHolder = [None]
+							event = threading.Event()
+							
+							class _ImgInfo:
+								def __init__(self, w, h):
+									self.recogWidth = w
+									self.recogHeight = h
+									self.resizeFactor = 1
+								def convertXToScreen(self, x):
+									return ocrLeft + x
+								def convertYToScreen(self, y):
+									return ocrTop + y
+								def convertWidthToScreen(self, w):
+									return w
+								def convertHeightToScreen(self, h):
+									return h
+							
+							imgInfo = _ImgInfo(ocrWidth, ocrHeight)
+							
+							def _onOcr(result):
+								resultHolder[0] = result
+								event.set()
+							
+							recognizer.recognize(pixels, imgInfo, _onOcr)
+							event.wait(timeout=2.0)
+							
+							result = resultHolder[0]
+							if result and not isinstance(result, Exception):
+								ocrText = getattr(result, 'text', '') or ''
+								ocrText = ocrText.strip()
+								# Windows OCR inserts spaces between CJK chars
+								# e.g. '記 事 本' → '記事本'
+								ocrText = _removeCJKSpaces(ocrText)
+								
+								log.debug(f"LINE: OCR result text: {ocrText!r}")
+								
+								# Check for notes-specific keywords
+								# Includes tab texts and notes header/title keywords
+								NOTES_OCR_KEYWORDS = [
+									"記事本", "相簿", "已儲存",
+									"note", "album", "saved", "keep",
+									"ノート", "アルバム", "保存済み",
+									"บันทึก", "노트",
+								]
+								if any(kw in ocrText.lower() for kw in NOTES_OCR_KEYWORDS):
+									isNotesWindow = True
+									log.info(f"LINE: Detected notes window via OCR: {ocrText!r}")
+								else:
+									log.debug(f"LINE: No notes keywords found in OCR text")
+							else:
+								log.debug(f"LINE: OCR returned no result or error: {result}")
+						else:
+							log.debug("LINE: No OCR languages available")
+			except Exception:
+				log.debug("LINE: notes window OCR detection failed", exc_info=True)
+
 		# --- Single edit field: detect search vs message input ---
 		# Strategy 1: Try reading UIA Name or Value for placeholder/content clues
 		placeholder = ""
@@ -1195,6 +1340,11 @@ def _detectEditFieldLabel(element, handler):
 		MESSAGE_KEYWORDS = ("輸入訊息", "message", "メッセージ", "ข้อความ", "입력")
 		if placeholder:
 			if any(kw in placeholder for kw in SEARCH_KEYWORDS):
+				# If in notes window, return notes search label
+				if isNotesWindow:
+					# Translators: Label for the search notes content field in LINE
+					return _("Search notes content")
+				# Otherwise, return chat rooms search label
 				# Translators: Label for the search chat rooms field in LINE
 				return _("Search chat rooms")
 			if any(kw in placeholder for kw in MESSAGE_KEYWORDS):
@@ -1224,12 +1374,18 @@ def _detectEditFieldLabel(element, handler):
 
 				log.debug(
 					f"LINE edit field position: relX={relativeX:.2f}, "
-					f"relY={relativeY:.2f}, relBottom={relativeBottom:.2f}"
+					f"relY={relativeY:.2f}, relBottom={relativeBottom:.2f}, "
+					f"windowTitle={windowTitle!r}, isNotesWindow={isNotesWindow}"
 				)
 
 				# Search field: in the left sidebar (< 50% of window width)
 				# and near the top of the window
 				if relativeX < 0.5 and relativeY < 0.3:
+					# If in notes window, return notes search label
+					if isNotesWindow:
+						# Translators: Label for the search notes content field in LINE
+						return _("Search notes content")
+					# Otherwise, return chat rooms search label
 					# Translators: Label for the search chat rooms field in LINE
 					return _("Search chat rooms")
 
@@ -1245,6 +1401,8 @@ def _detectEditFieldLabel(element, handler):
 	except Exception:
 		log.debug("_detectEditFieldLabel failed", exc_info=True)
 		return ""
+
+
 
 
 def _queryAndSpeakUIAFocus():
@@ -3042,6 +3200,65 @@ class AppModule(appModuleHandler.AppModule):
 		
 		return (iconX, iconY, winRight)
 	
+	def _clickMoreOptionsButton(self):
+		"""Click the more options (⋮) button in the chat header.
+		
+		The more options button is the rightmost icon in the header (index 0).
+		Returns True if successful, False if window not found.
+		"""
+		import ctypes
+		import ctypes.wintypes
+		
+		hwnd = ctypes.windll.user32.GetForegroundWindow()
+		if not hwnd:
+			log.debug("LINE: no foreground window for more options click")
+			return False
+		
+		scale = _getDpiScale(hwnd)
+		
+		# Get window rect
+		rect = ctypes.wintypes.RECT()
+		ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+		winLeft = rect.left
+		winTop = rect.top
+		winRight = rect.right
+		
+		# Try DWM extended frame bounds for accuracy
+		dwmRect = ctypes.wintypes.RECT()
+		try:
+			DWMWA_EXTENDED_FRAME_BOUNDS = 9
+			hr = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+				hwnd, DWMWA_EXTENDED_FRAME_BOUNDS,
+				ctypes.byref(dwmRect), ctypes.sizeof(dwmRect)
+			)
+			if hr == 0 and (dwmRect.right != rect.right or dwmRect.top != rect.top):
+				winLeft = dwmRect.left
+				winTop = dwmRect.top
+				winRight = dwmRect.right
+		except Exception:
+			pass
+		
+		# Calculate more options button position (rightmost icon, index 0)
+		iconY = winTop + int(55 * scale)
+		firstIconOffset = int(15 * scale)
+		moreOptionsX = winRight - firstIconOffset
+		
+		log.info(
+			f"LINE: clicking more options button at ({moreOptionsX}, {iconY}), "
+			f"dpiScale={scale:.2f}"
+		)
+		
+		# Verify position is within window bounds
+		if moreOptionsX < winLeft or moreOptionsX > winRight:
+			log.warning(f"LINE: more options position {moreOptionsX} outside window bounds")
+			return False
+		
+		# Click the button
+		self._clickAtPosition(moreOptionsX, iconY, hwnd)
+		ui.message("更多選項")
+		
+		return True
+	
 	def _makeCallByType(self, callType):
 		"""Click phone icon, wait for popup menu, then click voice or video.
 		
@@ -4250,6 +4467,20 @@ class AppModule(appModuleHandler.AppModule):
 		except Exception as e:
 			log.warning(f"LINE makeVideoCall error: {e}", exc_info=True)
 			ui.message(f"視訊通話功能錯誤: {e}")
+	@script(
+		description="LINE: 點擊更多選項按鈕",
+		gesture="kb:NVDA+windows+o",
+		category="LINE Desktop",
+	)
+	def script_clickMoreOptions(self, gesture):
+		"""Click the more options (⋮) button in the chat header."""
+		try:
+			if not self._clickMoreOptionsButton():
+				ui.message("找不到 LINE 視窗，請先開啟聊天室")
+		except Exception as e:
+			log.warning(f"LINE clickMoreOptions error: {e}", exc_info=True)
+			ui.message(f"更多選項功能錯誤: {e}")
+
 
 	# ── Read chat room name ────────────────────────────────────────────
 
@@ -5637,6 +5868,165 @@ class AppModule(appModuleHandler.AppModule):
 		t = threading.Thread(target=_checkMicStatus, daemon=True)
 		t.start()
 
+	def script_toggleCameraAndAnnounce(self, gesture):
+		"""Pass Ctrl+Shift+V to LINE, then OCR the call window to announce camera status."""
+		# Always pass the gesture through first
+		gesture.send()
+
+		import ctypes
+		import ctypes.wintypes
+		import os
+		import threading
+
+		# LINE executable names
+		_LINE_EXES = {"line.exe", "line_app.exe", "linecall.exe", "linelauncher.exe"}
+
+		def _isLineProcess(pid):
+			"""Check if a PID belongs to a LINE process."""
+			if pid == self.processID:
+				return True
+			try:
+				PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+				hProc = ctypes.windll.kernel32.OpenProcess(
+					PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+				)
+				if hProc:
+					try:
+						buf = ctypes.create_unicode_buffer(260)
+						size = ctypes.wintypes.DWORD(260)
+						ok = ctypes.windll.kernel32.QueryFullProcessImageNameW(
+							hProc, 0, buf, ctypes.byref(size)
+						)
+						if ok:
+							exeName = os.path.basename(buf.value).lower()
+							return exeName in _LINE_EXES
+					finally:
+						ctypes.windll.kernel32.CloseHandle(hProc)
+			except Exception:
+				pass
+			return False
+
+		# ── Find the call window ──────────────────────────────────
+		hwnd = None
+		mainHwnd = None
+		try:
+			mainHwnd = self.windowHandle
+		except Exception:
+			pass
+
+		fgHwnd = ctypes.windll.user32.GetForegroundWindow()
+		if fgHwnd and fgHwnd != mainHwnd:
+			fgPid = ctypes.wintypes.DWORD()
+			ctypes.windll.user32.GetWindowThreadProcessId(
+				fgHwnd, ctypes.byref(fgPid)
+			)
+			if _isLineProcess(fgPid.value):
+				hwnd = fgHwnd
+				log.info(
+					f"LINE: camera status using foreground window "
+					f"as call window: hwnd={fgHwnd}"
+				)
+
+		# Fallback to _findIncomingCallWindow
+		if not hwnd:
+			hwnd = self._findIncomingCallWindow()
+
+		if not hwnd:
+			# Not in a call, just let the keystroke go through silently
+			return
+
+		appModRef = self
+
+		def _checkCameraStatus():
+			"""After a short delay, OCR the call window to detect camera status.
+
+			For video calls, LINE auto-hides the control bar. We move the
+			mouse into the window to trigger it to appear, then OCR.
+			"""
+			import time
+
+			try:
+				rect = ctypes.wintypes.RECT()
+				ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+				winW = rect.right - rect.left
+				winH = rect.bottom - rect.top
+
+				if winW <= 0 or winH <= 0:
+					return
+
+				# Save original mouse position
+				origPt = ctypes.wintypes.POINT()
+				ctypes.windll.user32.GetCursorPos(ctypes.byref(origPt))
+
+				# Move mouse to bottom-center of the call window.
+				# This triggers LINE's auto-hiding control bar in video calls.
+				centerX = (rect.left + rect.right) // 2
+				bottomY = rect.top + int(winH * 0.80)
+				ctypes.windll.user32.SetCursorPos(centerX, bottomY)
+
+				# Wait for controls to appear + camera toggle animation
+				time.sleep(0.8)
+
+				# Re-read window rect (may have changed)
+				ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+				winW = rect.right - rect.left
+				winH = rect.bottom - rect.top
+
+				# Attempt 1: OCR bottom 30% (standard for voice calls)
+				bottomRegion = (
+					int(rect.left),
+					int(rect.top + int(winH * 0.70)),
+					winW,
+					int(winH * 0.30),
+				)
+				ocrText = appModRef._ocrWindowArea(
+					hwnd, region=bottomRegion, sync=True, timeout=3.0
+				)
+				ocrText = ocrText.strip() if ocrText else ""
+
+				if ocrText:
+					log.info(f"LINE: camera status OCR (bottom 30%): {ocrText!r}")
+					if _announceCameraFromOcr(ocrText):
+						ctypes.windll.user32.SetCursorPos(origPt.x, origPt.y)
+						return
+
+				# Attempt 2: OCR entire window (video call controls
+				# may appear in the center or as an overlay)
+				ocrText = appModRef._ocrWindowArea(
+					hwnd, sync=True, timeout=3.0
+				)
+				ocrText = ocrText.strip() if ocrText else ""
+
+				# Restore mouse position
+				ctypes.windll.user32.SetCursorPos(origPt.x, origPt.y)
+
+				if ocrText:
+					log.info(f"LINE: camera status OCR (full window): {ocrText!r}")
+					_announceCameraFromOcr(ocrText)
+				else:
+					log.debug("LINE: camera status OCR returned empty")
+
+			except Exception as e:
+				log.debug(f"LINE: camera status check failed: {e}", exc_info=True)
+
+		def _announceCameraFromOcr(ocrText):
+			"""Detect camera on/off from OCR text and announce. Returns True if detected."""
+			import wx
+			# "關鏡頭"/"關相機"/"關閉相機" means tooltip says "turn off" → camera is ON
+			if any(kw in ocrText for kw in ["關鏡頭", "關相機", "關閉相機", "Turn off camera", "turn off camera"]):
+				wx.CallAfter(ui.message, "相機已開啟")
+				return True
+			# "開鏡頭"/"開相機"/"開啟相機" means tooltip says "turn on" → camera is OFF
+			elif any(kw in ocrText for kw in ["開鏡頭", "開相機", "開啟相機", "Turn on camera", "turn on camera"]):
+				wx.CallAfter(ui.message, "相機已關閉")
+				return True
+			else:
+				log.debug(f"LINE: camera status not detected in OCR: {ocrText!r}")
+				return False
+
+		t = threading.Thread(target=_checkCameraStatus, daemon=True)
+		t.start()
+
 	__gestures = {
 		"kb:tab": "navigateAndTrack",
 		"kb:shift+tab": "navigateAndTrack",
@@ -5650,4 +6040,5 @@ class AppModule(appModuleHandler.AppModule):
 		"kb:control+3": "switchTabAndAnnounce",
 		"kb:enter": "sendMessageAndPlaySound",
 		"kb:control+shift+a": "toggleMicAndAnnounce",
+		"kb:control+shift+v": "toggleCameraAndAnnounce",
 	}
