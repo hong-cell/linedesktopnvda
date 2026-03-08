@@ -1179,9 +1179,30 @@ def _detectEditFieldLabel(element, handler):
 		# Notes window keywords (check for notes/Keep in window title)
 		NOTES_KEYWORDS = ("記事本", "note", "keep", "ノート", "บันทึก", "노트")
 		isNotesWindow = any(kw in windowTitle for kw in NOTES_KEYWORDS)
+
+		# Additional check 1: Walk UIA ancestors to find notes keywords in element names
+		# The notes panel often has a parent/ancestor element whose name contains notes text.
+		if not isNotesWindow:
+			try:
+				ancestor = element
+				for _depth in range(5):
+					ancestor = walker.GetParentElement(ancestor)
+					if not ancestor:
+						break
+					try:
+						ancestorName = ancestor.CurrentName
+						if ancestorName and isinstance(ancestorName, str):
+							ancestorNameLower = ancestorName.strip().lower()
+							if any(kw in ancestorNameLower for kw in NOTES_KEYWORDS):
+								isNotesWindow = True
+								log.info(f"LINE: Detected notes window via UIA ancestor name: {ancestorName!r}")
+								break
+					except Exception:
+						continue
+			except Exception:
+				log.debug("LINE: UIA ancestor notes detection failed", exc_info=True)
 		
-		# Additional check: Use OCR on the top area to detect notes tabs
-		# LINE notes has "相簿" and "已儲存" tabs at the top
+		# Additional check 2: Use OCR on the top area to detect notes tabs/header
 		if not isNotesWindow:
 			try:
 				hwnd = ctypes.windll.user32.GetForegroundWindow()
@@ -1195,10 +1216,11 @@ def _detectEditFieldLabel(element, handler):
 					log.debug(f"LINE: Attempting OCR notes detection, window size: {winWidth}x{winHeight}")
 					
 					if winWidth > 0 and winHeight > 0:
-						# OCR the top-center area where tabs are located (center 60%, top 12%)
-						ocrWidth = int(winWidth * 0.6)
-						ocrHeight = int(winHeight * 0.12)
-						ocrLeft = wndRect.left + int(winWidth * 0.2)  # Start from 20% from left
+						# OCR the full-width top area (100% width, top 20%)
+						# to capture notes header/title that may appear anywhere
+						ocrWidth = winWidth
+						ocrHeight = int(winHeight * 0.20)
+						ocrLeft = wndRect.left
 						ocrTop = wndRect.top
 						
 						log.debug(f"LINE: OCR region: left={ocrLeft}, top={ocrTop}, width={ocrWidth}, height={ocrHeight}")
@@ -1255,17 +1277,27 @@ def _detectEditFieldLabel(element, handler):
 								event.set()
 							
 							recognizer.recognize(pixels, imgInfo, _onOcr)
-							event.wait(timeout=2.0)  # Increased timeout to 2 seconds
+							event.wait(timeout=2.0)
 							
 							result = resultHolder[0]
 							if result and not isinstance(result, Exception):
 								ocrText = getattr(result, 'text', '') or ''
 								ocrText = ocrText.strip()
+								# Windows OCR inserts spaces between CJK chars
+								# e.g. '記 事 本' → '記事本'
+								ocrText = _removeCJKSpaces(ocrText)
 								
 								log.debug(f"LINE: OCR result text: {ocrText!r}")
 								
 								# Check for notes-specific keywords
-								if any(kw in ocrText for kw in ["相簿", "已儲存", "album", "saved", "アルバム", "保存済み"]):
+								# Includes tab texts and notes header/title keywords
+								NOTES_OCR_KEYWORDS = [
+									"記事本", "相簿", "已儲存",
+									"note", "album", "saved", "keep",
+									"ノート", "アルバム", "保存済み",
+									"บันทึก", "노트",
+								]
+								if any(kw in ocrText.lower() for kw in NOTES_OCR_KEYWORDS):
 									isNotesWindow = True
 									log.info(f"LINE: Detected notes window via OCR: {ocrText!r}")
 								else:
