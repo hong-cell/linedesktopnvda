@@ -24,7 +24,7 @@ url = None
 version = 1.1.3
 changelog = \"\"\"Initial release with LINE desktop accessibility support.\"\"\"
 docFileName = readme.html
-minimumNVDAVersion = 0.0
+minimumNVDAVersion = 2019.3
 lastTestedNVDAVersion = 2026.1
 updateChannel = None
 """
