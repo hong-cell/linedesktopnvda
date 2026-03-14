@@ -1646,6 +1646,108 @@ def _copyAndReadMessage(targetElement):
 		(pos_5_6, clampedBottom, "5/6-bottom"),
 	]
 	selectAllCount = [0]  # mutable counter for ≤2-item menus
+	messageOcrCache = {"done": False, "text": ""}
+
+	def _getMessageOcrText():
+		"""OCR the message bubble to detect file/voice message hints."""
+		if messageOcrCache["done"]:
+			return messageOcrCache["text"]
+		messageOcrCache["done"] = True
+		try:
+			msgRect = targetElement.CurrentBoundingRectangle
+			msgW = int(msgRect.right - msgRect.left)
+			msgH = int(msgRect.bottom - msgRect.top)
+			if msgW <= 0 or msgH <= 0:
+				messageOcrCache["text"] = ""
+				return ""
+			import screenBitmap
+			from contentRecog import uwpOcr
+			import threading
+
+			mLeft = int(msgRect.left)
+			mTop = int(msgRect.top)
+			sb = screenBitmap.ScreenBitmap(msgW, msgH)
+			pixels = sb.captureImage(mLeft, mTop, msgW, msgH)
+
+			langs = uwpOcr.getLanguages()
+			ocrLang = None
+			for cand in ["zh-Hant-TW", "zh-TW", "zh-Hant"]:
+				if cand in langs:
+					ocrLang = cand
+					break
+			if not ocrLang:
+				for lang in langs:
+					if lang.startswith("zh"):
+						ocrLang = lang
+						break
+			if not ocrLang and langs:
+				ocrLang = langs[0]
+			if not ocrLang:
+				messageOcrCache["text"] = ""
+				return ""
+
+			recognizer = uwpOcr.UwpOcr(language=ocrLang)
+			resizeFactor = recognizer.getResizeFactor(msgW, msgH)
+			if resizeFactor <= 0:
+				resizeFactor = 1
+
+			if resizeFactor > 1:
+				sb2 = screenBitmap.ScreenBitmap(
+					msgW * resizeFactor,
+					msgH * resizeFactor,
+				)
+				ocrPixels = sb2.captureImage(mLeft, mTop, msgW, msgH)
+			else:
+				ocrPixels = pixels
+
+			class _ImgInfo:
+				def __init__(self, w, h, factor, sL, sT):
+					self.recogWidth = w * factor
+					self.recogHeight = h * factor
+					self.resizeFactor = factor
+					self._screenLeft = sL
+					self._screenTop = sT
+
+				def convertXToScreen(self, x):
+					return self._screenLeft + int(x / self.resizeFactor)
+
+				def convertYToScreen(self, y):
+					return self._screenTop + int(y / self.resizeFactor)
+
+				def convertWidthToScreen(self, w):
+					return int(w / self.resizeFactor)
+
+				def convertHeightToScreen(self, h):
+					return int(h / self.resizeFactor)
+
+			imgInfo = _ImgInfo(msgW, msgH, resizeFactor, mLeft, mTop)
+
+			resultHolder = [None]
+			event = threading.Event()
+
+			def _onOcr(result):
+				resultHolder[0] = result
+				event.set()
+
+			recognizer.recognize(ocrPixels, imgInfo, _onOcr)
+			event.wait(timeout=2.5)
+
+			msgText = ""
+			result = resultHolder[0]
+			if result and not isinstance(result, Exception):
+				msgText = getattr(result, 'text', '') or ''
+				msgText = _removeCJKSpaces(msgText.strip())
+
+			messageOcrCache["text"] = msgText
+			log.debug(f"LINE: copy-read message OCR: {msgText!r}")
+			return msgText
+		except Exception as e:
+			log.debug(
+				f"LINE: copy-read message OCR failed: {e}",
+				exc_info=True,
+			)
+			messageOcrCache["text"] = ""
+			return ""
 
 	def _attemptCopyAtOffset(posIdx=0):
 		"""Right-click at clickPositions[posIdx] and try to copy."""
@@ -1926,7 +2028,47 @@ def _copyAndReadMessage(targetElement):
 										f"line {targetLineIdx} → item {itemIdx}/{nItems}"
 									)
 				except Exception as e:
-					log.debug(f"LINE: copy-read popup OCR failed: {e}", exc_info=True)
+					log.debug(
+						f"LINE: copy-read popup OCR failed: {e}",
+						exc_info=True,
+					)
+
+			# Detect file / voice messages when Copy is unavailable
+			if not copyItem and menuItems and len(menuItems) >= 3:
+				def _menuHasText(keyword):
+					for _item, text in menuItems:
+						if text and keyword in text:
+							return True
+					if popupOcrText and keyword in popupOcrText:
+						return True
+					return False
+
+				menuHasSaveAs = _menuHasText("另存新檔")
+				menuHasSave = _menuHasText("儲存")
+				if menuHasSaveAs and menuHasSave:
+					msgOcrText = _getMessageOcrText()
+					if msgOcrText:
+						msgHasSaveAs = "另存新檔" in msgOcrText
+						msgHasSave = "儲存" in msgOcrText
+						if msgHasSaveAs and msgHasSave:
+							if "下載期限" in msgOcrText:
+								log.info("LINE: copy-read detected file message")
+								ui.message("檔案訊息。按 NVDA+Windows+K 另存新檔。")
+								_dismissMenu()
+								_restoreClipboard(origClip)
+								return
+							if (
+								"播放" in msgOcrText
+								and re.search(r"\d{1,2}:\d{2}", msgOcrText)
+							):
+								log.info("LINE: copy-read detected voice message")
+								ui.message(
+									"語音訊息。按 NVDA+Windows+P 播放，"
+									"按 NVDA+Windows+K 另存新檔。"
+								)
+								_dismissMenu()
+								_restoreClipboard(origClip)
+								return
 
 			# If still no match, check if we got the wrong menu
 			if not copyItem:
@@ -5649,6 +5791,92 @@ class AppModule(appModuleHandler.AppModule):
 		except Exception:
 			pass
 		self._contextMenuAction(1, "複製")
+
+	@script(
+		gesture="kb:NVDA+windows+k",
+		description=_("Save the current message as a file"),
+		category="LINE",
+	)
+	def script_saveAsMessage(self, gesture):
+		"""Save the current message via right-click context menu (Save As)."""
+		if _suppressAddon:
+			return
+
+		def _afterSaveAs():
+			global _suppressAddon
+			_suppressAddon = True
+			log.info(
+				"LINE: Save As selected, addon suppressed, "
+				"waiting for file dialog..."
+			)
+			core.callLater(1000, self._pollFileDialog)
+
+		self._contextMenuAction(0, "另存新檔", afterCallback=_afterSaveAs)
+
+	@script(
+		gesture="kb:NVDA+windows+p",
+		description=_("Play the current voice message"),
+		category="LINE",
+	)
+	def script_playVoiceMessage(self, gesture):
+		"""Play the current voice message by clicking the Play button."""
+		if _suppressAddon:
+			return
+		try:
+			handler = UIAHandler.handler
+			if handler:
+				rawEl = handler.clientObject.GetFocusedElement()
+				if rawEl:
+					walker = handler.clientObject.RawViewWalker
+					target = None
+					queue = [(rawEl, 0)]
+					visited = 0
+					while queue and visited < 80:
+						el, depth = queue.pop(0)
+						visited += 1
+						try:
+							name = el.CurrentName or ""
+						except Exception:
+							name = ""
+						if name and ("播放" in name or "Play" in name):
+							target = el
+							break
+						if depth < 4:
+							try:
+								child = walker.GetFirstChildElement(el)
+								while child:
+									queue.append((child, depth + 1))
+									child = walker.GetNextSiblingElement(child)
+							except Exception:
+								pass
+					if target:
+						try:
+							rect = target.CurrentBoundingRectangle
+							cx = int((rect.left + rect.right) / 2)
+							cy = int((rect.top + rect.bottom) / 2)
+							if cx > 0 and cy > 0:
+								self._clickAtPosition(cx, cy)
+								ui.message("播放")
+								return
+						except Exception:
+							pass
+		except Exception as e:
+			log.debug(
+				f"LINE: play voice message UIA search failed: {e}",
+				exc_info=True,
+			)
+
+		# Fallback: send Space to toggle play/pause
+		try:
+			from keyboardHandler import KeyboardInputGesture
+			KeyboardInputGesture.fromName("space").send()
+			ui.message("播放")
+		except Exception as e:
+			log.warning(
+				f"LINE: play voice message fallback failed: {e}",
+				exc_info=True,
+			)
+			ui.message("無法播放")
 
 	@script(
 		gesture="kb:NVDA+windows+delete",
