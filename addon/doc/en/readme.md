@@ -163,7 +163,7 @@ This add-on enhances the NVDA screen reader's support for the LINE Desktop appli
 
 * **LINE User Group**: [Join Group](https://line.me/R/ti/g/BKQ2dZtTjx)
   Feel free to join the group to suggest features, report issues, or discuss with the development team.
-* **Source Code & Issue Tracker**: [GitHub Repository](https://github.com/keyang556/linedesktopnvda)
+* **Source Code & Issue Tracker**: [GitHub Repository](https://github.com/hong-cell/linedesktopnvda)
   If you have feature suggestions or find bugs, feel free to open an Issue; if you are willing to contribute code, Pull Requests are entirely welcome.
 * **Contact Developer**: [Contact Ken Chang (LINE)](https://line.me/ti/p/3GigC88lAt)
 
