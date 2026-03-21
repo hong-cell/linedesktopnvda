@@ -12,8 +12,18 @@ _CJK_SPACE_RE = re.compile(
 	r'(?<=' + _CJK_CHAR + r') (?=' + _CJK_CHAR + r')'
 )
 
+# OCR 常見錯字修正表（原文 → 正確文字）
+_OCR_CORRECTIONS = {
+	'眧': '照',
+}
+
 def _removeCJKSpaces(text):
 	return _CJK_SPACE_RE.sub('', text)
+
+def _fixOcrErrors(text):
+	for wrong, correct in _OCR_CORRECTIONS.items():
+		text = text.replace(wrong, correct)
+	return text
 
 
 class ChatMoreOptions(VirtualWindow):
@@ -43,7 +53,7 @@ class ChatMoreOptions(VirtualWindow):
 			return
 
 		text = getattr(result, 'text', '') or ''
-		text = _removeCJKSpaces(text.strip())
+		text = _fixOcrErrors(_removeCJKSpaces(text.strip()))
 		lines = [l.strip() for l in text.split('\n') if l.strip()]
 
 		if not lines:
