@@ -4654,32 +4654,172 @@ class AppModule(appModuleHandler.AppModule):
 
 		pid = wintypes.DWORD()
 		tid = ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-
-		popupCandidates = []
 		WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+		threadWindows = []
+		seenWindows = set()
+
+		def _captureWindowInfo(targetHwnd):
+			if (
+				not targetHwnd
+				or targetHwnd in seenWindows
+				or not ctypes.windll.user32.IsWindow(targetHwnd)
+				or not ctypes.windll.user32.IsWindowVisible(targetHwnd)
+			):
+				return
+
+			wRect = wintypes.RECT()
+			ctypes.windll.user32.GetWindowRect(targetHwnd, ctypes.byref(wRect))
+			width = wRect.right - wRect.left
+			height = wRect.bottom - wRect.top
+			if width < 50 or height < 100:
+				return
+
+			classBuf = ctypes.create_unicode_buffer(256)
+			ctypes.windll.user32.GetClassNameW(targetHwnd, classBuf, 256)
+			seenWindows.add(targetHwnd)
+			threadWindows.append({
+				"hwnd": targetHwnd,
+				"left": wRect.left,
+				"top": wRect.top,
+				"right": wRect.right,
+				"bottom": wRect.bottom,
+				"width": width,
+				"height": height,
+				"area": width * height,
+				"className": classBuf.value,
+			})
 
 		def _enumCb(enumHwnd, lParam):
-			if enumHwnd != hwnd and ctypes.windll.user32.IsWindowVisible(enumHwnd):
-				wRect = wintypes.RECT()
-				ctypes.windll.user32.GetWindowRect(enumHwnd, ctypes.byref(wRect))
-				w = wRect.right - wRect.left
-				h = wRect.bottom - wRect.top
-				if w >= 50 and h >= 100:
-					popupCandidates.append((enumHwnd, wRect.left, wRect.top, wRect.right, wRect.bottom))
+			_captureWindowInfo(enumHwnd)
 			return True
 
 		ctypes.windll.user32.EnumThreadWindows(tid, WNDENUMPROC(_enumCb), 0)
+		_captureWindowInfo(hwnd)
 
-		if not popupCandidates:
+		if not threadWindows:
 			if retriesLeft > 0:
 				import core
 				core.callLater(300, lambda: self._activateMoreOptionsMenu(retriesLeft - 1))
 			return
 
-		_, left, top, right, bottom = popupCandidates[0]
+		mainWindow = max(threadWindows, key=lambda item: item["area"])
+		scale = _getDpiScale(mainWindow["hwnd"])
+		anchorX = mainWindow["right"] - int(15 * scale)
+		anchorY = mainWindow["top"] + int(55 * scale)
+		mainArea = max(mainWindow["area"], 1)
+
+		def _distanceToRect(pointX, pointY, rectInfo):
+			dx = 0
+			if pointX < rectInfo["left"]:
+				dx = rectInfo["left"] - pointX
+			elif pointX > rectInfo["right"]:
+				dx = pointX - rectInfo["right"]
+			dy = 0
+			if pointY < rectInfo["top"]:
+				dy = rectInfo["top"] - pointY
+			elif pointY > rectInfo["bottom"]:
+				dy = pointY - rectInfo["bottom"]
+			return dx + dy
+
+		candidates = []
+		for info in threadWindows:
+			if (
+				info["width"] >= int(mainWindow["width"] * 0.85)
+				and info["height"] >= int(mainWindow["height"] * 0.85)
+			):
+				log.debug(
+					f"LINE: skipping near-main window hwnd={info['hwnd']} "
+					f"rect=({info['left']}, {info['top']}, {info['right']}, {info['bottom']}) "
+					f"class={info['className']!r}"
+				)
+				continue
+
+			distance = _distanceToRect(anchorX, anchorY, info)
+			score = distance * 4
+			score += abs(info["right"] - mainWindow["right"])
+			score += abs(info["top"] - anchorY)
+			score += int(info["area"] / mainArea * 500)
+			if info["left"] < mainWindow["left"] + int(mainWindow["width"] * 0.5):
+				score += 250
+			if info["top"] > mainWindow["top"] + int(220 * scale):
+				score += 200
+			containsAnchor = (
+				info["left"] <= anchorX <= info["right"]
+				and info["top"] - int(24 * scale) <= anchorY <= info["bottom"]
+			)
+			if containsAnchor:
+				score -= 150
+
+			info["geometryScore"] = score
+			info["containsAnchor"] = containsAnchor
+			candidates.append(info)
+			log.debug(
+				f"LINE: more options candidate hwnd={info['hwnd']} "
+				f"class={info['className']!r} "
+				f"rect=({info['left']}, {info['top']}, {info['right']}, {info['bottom']}) "
+				f"score={score} containsAnchor={containsAnchor}"
+			)
+
+		if not candidates:
+			if retriesLeft > 0:
+				import core
+				core.callLater(300, lambda: self._activateMoreOptionsMenu(retriesLeft - 1))
+			return
+
+		candidates.sort(key=lambda item: item["geometryScore"])
+
+		from ._virtualWindows.chatMoreOptions import ChatMoreOptions, _matchMenuLabel
+
+		bestCandidate = None
+		bestMatchCount = -1
+		topCandidates = candidates[: min(3, len(candidates))]
+		for info in topCandidates:
+			ocrText = self._ocrWindowArea(
+				info["hwnd"],
+				region=(
+					info["left"],
+					info["top"],
+					info["width"],
+					info["height"],
+				),
+				sync=True,
+				timeout=1.5,
+			)
+			labels = []
+			for line in ocrText.splitlines():
+				label = _matchMenuLabel(line)
+				if label and label not in labels:
+					labels.append(label)
+			info["ocrMenuLabels"] = labels
+			log.debug(
+				f"LINE: more options candidate hwnd={info['hwnd']} "
+				f"OCR labels={labels}"
+			)
+			if len(labels) > bestMatchCount:
+				bestCandidate = info
+				bestMatchCount = len(labels)
+			elif (
+				len(labels) == bestMatchCount
+				and bestCandidate
+				and info["geometryScore"] < bestCandidate["geometryScore"]
+			):
+				bestCandidate = info
+
+		if bestCandidate is None:
+			bestCandidate = candidates[0]
+
+		if bestMatchCount <= 0 and retriesLeft > 0:
+			import core
+			log.debug("LINE: more options popup not verified by OCR yet, retrying")
+			core.callLater(300, lambda: self._activateMoreOptionsMenu(retriesLeft - 1))
+			return
+
+		left = bestCandidate["left"]
+		top = bestCandidate["top"]
+		right = bestCandidate["right"]
+		bottom = bestCandidate["bottom"]
 		log.info(f"LINE: more options popup found at ({left}, {top}, {right}, {bottom})")
 
-		from ._virtualWindows.chatMoreOptions import ChatMoreOptions
 		VirtualWindow.currentWindow = ChatMoreOptions((left, top, right, bottom))
 
 
