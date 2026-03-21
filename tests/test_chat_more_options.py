@@ -30,6 +30,15 @@ def _load_chat_more_options_module():
 	class VirtualWindow:
 		currentWindow = None
 
+		@property
+		def element(self):
+			if not getattr(self, "elements", None):
+				return None
+			return self.elements[self.pos]
+
+		def click(self):
+			return None
+
 	virtual_window_mod.VirtualWindow = VirtualWindow
 	sys.modules["addon.appModules._virtualWindow"] = virtual_window_mod
 
@@ -120,3 +129,52 @@ def test_build_menu_elements_assigns_fallback_clickpoints_when_rects_are_missing
 		(1150, 250),
 		(1150, 350),
 	]
+
+
+def test_build_menu_elements_aligns_to_popup_row_rects_for_lower_items():
+	lines = [
+		{"text": "開啟提醒", "rect": (1084, 145, 1188, 177)},
+		{"text": "邀請", "rect": (1084, 201, 1140, 233)},
+		{"text": "儲存聊天", "rect": (1084, 506, 1188, 538)},
+		{"text": "背景設定", "rect": (1084, 555, 1188, 587)},
+	]
+	row_rects = [
+		(1058, 138, 1348, 184),
+		(1058, 194, 1348, 240),
+		(1058, 456, 1348, 478),
+		(1058, 500, 1348, 546),
+		(1058, 549, 1348, 595),
+	]
+
+	elements = chat_more_options._buildMenuElements(
+		lines,
+		(1055, 89, 1355, 718),
+		rowRects=row_rects,
+	)
+
+	assert [element["name"] for element in elements] == [
+		"開啟提醒",
+		"邀請",
+		"儲存聊天",
+		"背景設定",
+	]
+	assert [element["clickPoint"] for element in elements] == [
+		(1203, 161),
+		(1203, 217),
+		(1203, 523),
+		(1203, 572),
+	]
+
+
+def test_chat_more_options_click_invokes_action_callback_and_closes_window():
+	calls = []
+	window = object.__new__(chat_more_options.ChatMoreOptions)
+	window.elements = [{"name": "儲存聊天", "clickPoint": (1203, 523)}]
+	window.pos = 0
+	window.onAction = calls.append
+
+	chat_more_options.VirtualWindow.currentWindow = window
+	chat_more_options.ChatMoreOptions.click(window)
+
+	assert calls == ["儲存聊天"]
+	assert chat_more_options.VirtualWindow.currentWindow is None

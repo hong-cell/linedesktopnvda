@@ -98,6 +98,93 @@ def _removeCJKSpaces(text):
 		return text
 	return _CJK_SPACE_RE.sub('', text)
 
+
+def _collectPopupMenuRowRects(
+	popupHwnd,
+	popupRect: tuple[int, int, int, int],
+	maxDepth: int = 5,
+) -> list[tuple[int, int, int, int]]:
+	"""Collect clickable menu-row rectangles from a popup window via UIA."""
+	left, top, right, bottom = popupRect
+	popupWidth = max(1, right - left)
+	popupHeight = max(1, bottom - top)
+
+	try:
+		handler = UIAHandler.handler
+		client = getattr(handler, "clientObject", None)
+		if not client:
+			return []
+		rootElement = client.ElementFromHandle(popupHwnd)
+		if not rootElement:
+			return []
+		walker = client.RawViewWalker
+	except Exception as e:
+		log.debug(f"LINE: failed to initialize popup row rect collector: {e}")
+		return []
+
+	rowRects: list[tuple[int, int, int, int]] = []
+	seen = set()
+
+	def _normalizeRect(rect):
+		try:
+			rowLeft = max(left, int(rect.left))
+			rowTop = max(top, int(rect.top))
+			rowRight = min(right, int(rect.right))
+			rowBottom = min(bottom, int(rect.bottom))
+		except Exception:
+			return None
+		if rowRight <= rowLeft or rowBottom <= rowTop:
+			return None
+		return (rowLeft, rowTop, rowRight, rowBottom)
+
+	def _visit(parent, depth=0):
+		try:
+			child = walker.GetFirstChildElement(parent)
+		except Exception:
+			return
+
+		idx = 0
+		while child and idx < 40:
+			try:
+				rect = _normalizeRect(child.CurrentBoundingRectangle)
+				if rect:
+					rowLeft, rowTop, rowRight, rowBottom = rect
+					rowWidth = rowRight - rowLeft
+					rowHeight = rowBottom - rowTop
+					isRowLike = (
+						24 <= rowHeight <= 90
+						and rowWidth >= int(popupWidth * 0.55)
+					)
+					isContainerLike = (
+						depth < maxDepth
+						and (
+							rowHeight > 90
+							or (
+								rowWidth >= int(popupWidth * 0.75)
+								and rowHeight >= int(popupHeight * 0.20)
+							)
+						)
+					)
+					if isRowLike:
+						if rect not in seen:
+							seen.add(rect)
+							rowRects.append(rect)
+					elif isContainerLike:
+						_visit(child, depth + 1)
+			except Exception:
+				pass
+
+			try:
+				child = walker.GetNextSiblingElement(child)
+			except Exception:
+				break
+			idx += 1
+
+	_visit(rootElement)
+	rowRects.sort(key=lambda rect: (((rect[1] + rect[3]) / 2), rect[0]))
+	log.debug(f"LINE: collected {len(rowRects)} popup row rects: {rowRects}")
+	return rowRects
+
 # Global variable to track the last focused object
 # This is needed because api.getFocusObject() sometimes returns the main Window
 # even when we handled a gainFocus event for a ListItem.
@@ -4818,9 +4905,17 @@ class AppModule(appModuleHandler.AppModule):
 		top = bestCandidate["top"]
 		right = bestCandidate["right"]
 		bottom = bestCandidate["bottom"]
+		popupRect = (left, top, right, bottom)
+		popupRowRects = _collectPopupMenuRowRects(
+			bestCandidate["hwnd"],
+			popupRect,
+		)
 		log.info(f"LINE: more options popup found at ({left}, {top}, {right}, {bottom})")
-
-		VirtualWindow.currentWindow = ChatMoreOptions((left, top, right, bottom))
+		VirtualWindow.currentWindow = ChatMoreOptions(
+			popupRect,
+			rowRects=popupRowRects,
+			onAction=self._handleChatMoreOptionsAction,
+		)
 
 
 
@@ -4985,14 +5080,22 @@ class AppModule(appModuleHandler.AppModule):
 			log.warning(f"LINE: file dialog poll error: {e}")
 			_suppressAddon = False
 
-	def script_openFileDialog(self, gesture):
-		"""Pass Ctrl+O to LINE, suppress addon while file dialog is open."""
+	def _suppressAddonForFileDialog(self, reason):
+		"""Pause addon behavior until LINE's file dialog closes."""
 		global _suppressAddon
 		_suppressAddon = True
-		log.info("LINE: Ctrl+O pressed, addon suppressed, waiting for file dialog...")
-		gesture.send()
-		# Start polling for file dialog to close after a short delay
+		log.info(f"LINE: {reason}, addon suppressed, waiting for file dialog...")
 		core.callLater(1000, self._pollFileDialog)
+
+	def _handleChatMoreOptionsAction(self, actionName):
+		"""Handle post-click actions from the chat more-options virtual window."""
+		if actionName == "儲存聊天":
+			self._suppressAddonForFileDialog("Save chat selected")
+
+	def script_openFileDialog(self, gesture):
+		"""Pass Ctrl+O to LINE, suppress addon while file dialog is open."""
+		self._suppressAddonForFileDialog("Ctrl+O pressed")
+		gesture.send()
 
 	def script_navigateAndTrack(self, gesture):
 		"""Pass navigation key to LINE, then poll UIA focused element.
@@ -6002,13 +6105,7 @@ class AppModule(appModuleHandler.AppModule):
 			return
 
 		def _afterSaveAs():
-			global _suppressAddon
-			_suppressAddon = True
-			log.info(
-				"LINE: Save As selected, addon suppressed, "
-				"waiting for file dialog..."
-			)
-			core.callLater(1000, self._pollFileDialog)
+			self._suppressAddonForFileDialog("Save As selected")
 
 		self._contextMenuAction(0, "另存新檔", afterCallback=_afterSaveAs)
 

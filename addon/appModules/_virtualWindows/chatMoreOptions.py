@@ -14,6 +14,7 @@ _CJK_SPACE_RE = re.compile(
 	r'(?<=' + _CJK_CHAR + r') (?=' + _CJK_CHAR + r')'
 )
 
+
 def _removeCJKSpaces(text):
 	return _CJK_SPACE_RE.sub('', text)
 
@@ -38,7 +39,15 @@ _MENU_LABEL_ALIASES = {
 	"關閉提醒": ("關閉提醒",),
 	"邀請": ("邀請",),
 	"相簿": ("相簿",),
-	"照片・影片": ("照片影片", "照片影⽚", "照片影像", "照片•影片", "照片‧影片", "眧片影片", "照片 影片"),
+	"照片・影片": (
+		"照片影片",
+		"照片影⽚",
+		"照片影像",
+		"照片•影片",
+		"照片‧影片",
+		"眧片影片",
+		"照片 影片",
+	),
 	"檔案": ("檔案",),
 	"連結": ("連結",),
 	"投票": ("投票",),
@@ -132,12 +141,79 @@ def _extractOcrLines(result: Any) -> list[dict[str, Any]]:
 	return extracted
 
 
+def _normalizeMenuRowRects(
+	rowRects: list[tuple[int, int, int, int]] | None,
+	popupRect: tuple[int, int, int, int],
+) -> list[tuple[int, int, int, int]]:
+	if not rowRects:
+		return []
+
+	left, top, right, bottom = popupRect
+	normalized: list[tuple[int, int, int, int]] = []
+	seen = set()
+	for rect in rowRects:
+		if not rect or len(rect) != 4:
+			continue
+		rowLeft, rowTop, rowRight, rowBottom = [int(value) for value in rect]
+		rowLeft = max(left, rowLeft)
+		rowTop = max(top, rowTop)
+		rowRight = min(right, rowRight)
+		rowBottom = min(bottom, rowBottom)
+		if rowRight <= rowLeft or rowBottom <= rowTop:
+			continue
+		key = (rowLeft, rowTop, rowRight, rowBottom)
+		if key in seen:
+			continue
+		seen.add(key)
+		normalized.append(key)
+
+	normalized.sort(key=lambda rect: (((rect[1] + rect[3]) / 2), rect[0]))
+	return normalized
+
+
+def _assignRowRectsToElements(
+	elements: list[dict[str, Any]],
+	rowRects: list[tuple[int, int, int, int]],
+) -> None:
+	if not elements or not rowRects:
+		return
+
+	currentRow = 0
+	totalRows = len(rowRects)
+	for elementIndex, element in enumerate(elements):
+		remainingElements = len(elements) - elementIndex
+		maxRowIndex = totalRows - remainingElements
+		if maxRowIndex < currentRow:
+			break
+
+		targetY = element.get("_lineCenterY")
+		chosenRowIndex = currentRow
+		if targetY is not None:
+			bestDistance = None
+			for rowIndex in range(currentRow, maxRowIndex + 1):
+				rowLeft, rowTop, rowRight, rowBottom = rowRects[rowIndex]
+				rowCenterY = (rowTop + rowBottom) / 2
+				distance = abs(rowCenterY - targetY)
+				if bestDistance is None or distance < bestDistance:
+					bestDistance = distance
+					chosenRowIndex = rowIndex
+
+		rowLeft, rowTop, rowRight, rowBottom = rowRects[chosenRowIndex]
+		element["clickPoint"] = (
+			int((rowLeft + rowRight) / 2),
+			int((rowTop + rowBottom) / 2),
+		)
+		currentRow = chosenRowIndex + 1
+
+
 def _buildMenuElements(
 	lines: list[dict[str, Any]],
 	popupRect: tuple[int, int, int, int],
+	rowRects: list[tuple[int, int, int, int]] | None = None,
 ) -> list[dict[str, Any]]:
 	left, top, right, bottom = popupRect
 	centerX = (left + right) // 2
+	rowRects = _normalizeMenuRowRects(rowRects, popupRect)
 	elements: list[dict[str, Any]] = []
 
 	for line in lines:
@@ -152,6 +228,7 @@ def _buildMenuElements(
 			continue
 
 		rect = line.get("rect")
+		lineCenterY = None
 		if rect:
 			lineLeft, lineTop, lineRight, lineBottom = rect
 			if (
@@ -164,6 +241,7 @@ def _buildMenuElements(
 			else:
 				clickY = int((lineTop + lineBottom) / 2)
 				clickX = int((lineLeft + lineRight) / 2)
+				lineCenterY = clickY
 		if not rect:
 			clickY = None
 			clickX = centerX
@@ -172,14 +250,17 @@ def _buildMenuElements(
 			"name": menuLabel,
 			"role": None,
 			"clickPoint": (clickX, clickY) if clickY is not None else None,
+			"_lineCenterY": lineCenterY,
 		})
 
 	if elements:
+		_assignRowRectsToElements(elements, rowRects)
 		itemHeight = (bottom - top) / len(elements)
 		for index, element in enumerate(elements):
 			if element["clickPoint"] is None:
 				itemCenterY = int(top + itemHeight * index + itemHeight / 2)
 				element["clickPoint"] = (centerX, itemCenterY)
+			element.pop("_lineCenterY", None)
 		return elements
 
 	textLines = [line["text"].strip() for line in lines if line["text"].strip()]
@@ -187,16 +268,20 @@ def _buildMenuElements(
 		return []
 
 	itemHeight = (bottom - top) / len(textLines)
-	for i, text in enumerate(textLines):
+	for index, text in enumerate(textLines):
 		normalized = _normalizeLineText(text)
 		if _NOISE_LINE_RE.fullmatch(normalized):
 			continue
-		itemCenterY = int(top + itemHeight * i + itemHeight / 2)
+		itemCenterY = int(top + itemHeight * index + itemHeight / 2)
 		elements.append({
 			"name": text,
 			"role": None,
 			"clickPoint": (centerX, itemCenterY),
+			"_lineCenterY": None,
 		})
+	_assignRowRectsToElements(elements, rowRects)
+	for element in elements:
+		element.pop("_lineCenterY", None)
 	return elements
 
 
@@ -207,10 +292,12 @@ class ChatMoreOptions(VirtualWindow):
 	def isMatchLineScreen(obj):
 		return False
 
-	def __init__(self, popupRect):
+	def __init__(self, popupRect, rowRects=None, onAction=None):
 		self.elements = []
 		self.pos = -1
 		self.popupRect = popupRect
+		self.rowRects = rowRects or []
+		self.onAction = onAction
 		left, top, right, bottom = popupRect
 		width = right - left
 		height = bottom - top
@@ -230,13 +317,25 @@ class ChatMoreOptions(VirtualWindow):
 		if not lineInfos:
 			text = getattr(result, 'text', '') or ''
 			text = _removeCJKSpaces(text.strip())
-			lineInfos = [{"text": l.strip(), "rect": None} for l in text.split('\n') if l.strip()]
+			lineInfos = [
+				{"text": line.strip(), "rect": None}
+				for line in text.split('\n')
+				if line.strip()
+			]
 
 		if not lineInfos:
 			log.debug("LINE: ChatMoreOptions OCR returned no lines")
 			return
 
-		self.elements = _buildMenuElements(lineInfos, self.popupRect)
+		self.elements = _buildMenuElements(
+			lineInfos,
+			self.popupRect,
+			rowRects=self.rowRects,
+		)
+		log.debug(
+			f"LINE: ChatMoreOptions click points: "
+			f"{[(e['name'], e.get('clickPoint')) for e in self.elements]}"
+		)
 
 		log.info(f"LINE: ChatMoreOptions found {len(self.elements)} items: {[e['name'] for e in self.elements]}")
 
@@ -245,5 +344,13 @@ class ChatMoreOptions(VirtualWindow):
 			self.show()
 
 	def click(self):
+		element = self.element
+		actionName = element.get("name") if element else None
+		hasClickPoint = bool(element and element.get("clickPoint"))
 		super().click()
 		VirtualWindow.currentWindow = None
+		if hasClickPoint and callable(self.onAction):
+			try:
+				self.onAction(actionName)
+			except Exception:
+				log.debug("LINE: ChatMoreOptions action callback failed", exc_info=True)
