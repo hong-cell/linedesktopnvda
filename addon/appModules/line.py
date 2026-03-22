@@ -6400,20 +6400,122 @@ class AppModule(appModuleHandler.AppModule):
 		After selecting recall, LINE shows a confirmation dialog.
 		We speak a prompt and wait for user to press Y (confirm) or N (cancel).
 		"""
-		appModRef = self
+		self._contextMenuAction(3, "收回", afterCallback=self._beginRecallConfirmation)
 
-		def _handleRecallDialog():
+	def _beginRecallConfirmation(self):
+		"""Prompt for recall confirmation and bind Y/N shortcuts."""
+		if getattr(self, '_recallPending', False):
 			ui.message("確認要收回嗎？按 Y 確認，按 N 取消")
-			appModRef._recallPending = True
-			appModRef.bindGesture("kb:y", "confirmRecall")
-			appModRef.bindGesture("kb:n", "cancelRecall")
-			# Auto-cancel after 10 seconds
-			def _autoCancel():
-				if getattr(appModRef, '_recallPending', False):
-					appModRef._endRecallConfirmation(False)
-			core.callLater(10000, _autoCancel)
+			return
 
-		self._contextMenuAction(3, "收回", afterCallback=_handleRecallDialog)
+		token = getattr(self, '_recallConfirmationToken', 0) + 1
+		self._recallConfirmationToken = token
+		self._recallPending = True
+		ui.message("確認要收回嗎？按 Y 確認，按 N 取消")
+		self.bindGesture("kb:y", "confirmRecall")
+		self.bindGesture("kb:n", "cancelRecall")
+
+		def _autoCancel():
+			if (
+				getattr(self, '_recallPending', False)
+				and getattr(self, '_recallConfirmationToken', 0) == token
+			):
+				self._endRecallConfirmation(False)
+
+		core.callLater(10000, _autoCancel)
+
+	def _isRecallConfirmationDialogVisible(self):
+		"""Return True when the centered LINE recall confirmation dialog is visible."""
+		try:
+			hwnd = ctypes.windll.user32.GetForegroundWindow()
+			if not hwnd:
+				return False
+
+			winRect = ctypes.wintypes.RECT()
+			ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(winRect))
+			winW = int(winRect.right - winRect.left)
+			winH = int(winRect.bottom - winRect.top)
+			if winW <= 0 or winH <= 0:
+				return False
+
+			scale = _getDpiScale(hwnd)
+			dialogW = min(int(winW * 0.82), int(460 * scale))
+			dialogH = min(int(winH * 0.55), int(260 * scale))
+			dialogW = max(dialogW, int(min(winW, 280 * scale)))
+			dialogH = max(dialogH, int(min(winH, 140 * scale)))
+			dialogLeft = int(winRect.left + (winW - dialogW) / 2)
+			dialogTop = int(winRect.top + (winH - dialogH) / 2)
+
+			ocrText = self._ocrWindowArea(
+				hwnd,
+				region=(dialogLeft, dialogTop, dialogW, dialogH),
+				sync=True,
+				timeout=2.0,
+			)
+			ocrText = _removeCJKSpaces((ocrText or "").strip())
+			normalizedLines = [
+				line.replace(" ", "")
+				for line in ocrText.splitlines()
+				if line.strip()
+			]
+			normalizedText = "".join(normalizedLines)
+			lineSet = set(normalizedLines)
+			hasButtons = (
+				{"收回", "取消"}.issubset(lineSet)
+				or ("收回" in normalizedText and "取消" in normalizedText)
+			)
+			hasRecallBody = any(
+				keyword in normalizedText
+				for keyword in (
+					"收回訊息",
+					"可能無法",
+					"聊天室",
+					"對方",
+					"line版本",
+				)
+			)
+			looksLikeCompactDialog = (
+				len(normalizedLines) <= 4
+				and any(line == "收回" for line in normalizedLines)
+				and any(line == "取消" for line in normalizedLines)
+			)
+			log.debug(
+				f"LINE: recall confirmation OCR: text={ocrText!r}, "
+				f"normalizedLines={normalizedLines}"
+			)
+			return hasButtons and (hasRecallBody or looksLikeCompactDialog)
+		except Exception as e:
+			log.debug(f"LINE: recall confirmation detection failed: {e}", exc_info=True)
+			return False
+
+	def _watchForRecallConfirmationDialog(self, retriesLeft=6, delayMs=250):
+		"""Poll briefly for the LINE recall confirmation dialog, then start Y/N mode."""
+		watchId = getattr(self, '_recallDialogWatchId', 0) + 1
+		self._recallDialogWatchId = watchId
+
+		def _poll(remaining):
+			if watchId != getattr(self, '_recallDialogWatchId', 0):
+				return
+			if getattr(self, '_recallPending', False):
+				return
+			try:
+				foreground = api.getForegroundObject()
+				if not foreground or foreground.appModule.appName != 'line':
+					return
+			except Exception:
+				return
+			if self._isRecallConfirmationDialogVisible():
+				self._beginRecallConfirmation()
+				return
+			if remaining > 0:
+				core.callLater(delayMs, lambda: _poll(remaining - 1))
+
+		core.callLater(delayMs, lambda: _poll(retriesLeft))
+
+	def _handleMessageContextMenuAction(self, actionName):
+		"""React to actions chosen from the message context virtual window."""
+		if actionName == "收回":
+			self._watchForRecallConfirmationDialog()
 
 	def _endRecallConfirmation(self, confirmed):
 		"""End the recall confirmation and clean up Y/N bindings."""
@@ -6774,6 +6876,7 @@ class AppModule(appModuleHandler.AppModule):
 					VirtualWindow.currentWindow = MessageContextMenu(
 						popupRect,
 						rowRects=popupRowRects,
+						onAction=self._handleMessageContextMenuAction,
 					)
 
 				except Exception as e:

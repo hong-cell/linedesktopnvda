@@ -287,11 +287,12 @@ class MessageContextMenu(VirtualWindow):
 	def isMatchLineScreen(obj):
 		return False
 
-	def __init__(self, popupRect, rowRects=None):
+	def __init__(self, popupRect, rowRects=None, onAction=None):
 		self.elements = []
 		self.pos = -1
 		self.popupRect = popupRect
 		self.rowRects = rowRects or []
+		self.onAction = onAction
 		left, top, right, bottom = popupRect
 		width = right - left
 		height = bottom - top
@@ -338,8 +339,16 @@ class MessageContextMenu(VirtualWindow):
 			self.show()
 
 	def click(self):
+		element = self.element
+		actionName = element.get("name") if element else None
+		hasClickPoint = bool(element and element.get("clickPoint"))
 		super().click()
 		VirtualWindow.currentWindow = None
+		if hasClickPoint and callable(self.onAction):
+			try:
+				self.onAction(actionName)
+			except Exception:
+				log.debug("LINE: MessageContextMenu action callback failed", exc_info=True)
 
 	def dismiss(self):
 		VirtualWindow.currentWindow = None
