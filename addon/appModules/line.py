@@ -185,6 +185,38 @@ def _collectPopupMenuRowRects(
 	log.debug(f"LINE: collected {len(rowRects)} popup row rects: {rowRects}")
 	return rowRects
 
+
+def _normalizeRuntimeId(runtimeId):
+	if runtimeId is None:
+		return None
+	try:
+		return tuple(int(part) for part in runtimeId)
+	except Exception:
+		try:
+			return tuple(runtimeId)
+		except Exception:
+			return None
+
+
+def _getElementRuntimeId(element):
+	if element is None:
+		return None
+	try:
+		return _normalizeRuntimeId(element.GetRuntimeId())
+	except Exception:
+		return None
+
+
+def _getFocusedElementRuntimeId():
+	try:
+		handler = UIAHandler.handler
+		client = getattr(handler, "clientObject", None)
+		if not client:
+			return None
+		return _getElementRuntimeId(client.GetFocusedElement())
+	except Exception:
+		return None
+
 # Global variable to track the last focused object
 # This is needed because api.getFocusObject() sometimes returns the main Window
 # even when we handled a gainFocus event for a ListItem.
@@ -198,6 +230,10 @@ _lastOCRElement = None
 # the announced element (which could be a list item found via selection detection).
 # This allows us to detect stuck-focus even after announcing a list item.
 _lastRawFocusedElement = None
+
+# Tracks the newest async request for opening the message context menu so
+# stale callLater callbacks do not speak after the user has moved on.
+_messageContextMenuRequestId = 0
 
 # Chat list navigation state.
 # When True, up/down arrows will be handled as chat list navigation
@@ -6418,6 +6454,7 @@ class AppModule(appModuleHandler.AppModule):
 	)
 	def script_messageContextMenu(self, gesture):
 		"""Right-click current message and open a virtual window for browsing the context menu."""
+		global _messageContextMenuRequestId
 		if _suppressAddon:
 			gesture.send()
 			return
@@ -6466,6 +6503,75 @@ class AppModule(appModuleHandler.AppModule):
 			ui.message("找不到目前的訊息")
 			return
 
+		_messageContextMenuRequestId += 1
+		requestId = _messageContextMenuRequestId
+		targetRuntimeId = _getElementRuntimeId(rawEl)
+
+		def _isCurrentRequest():
+			if requestId != _messageContextMenuRequestId:
+				return False
+			try:
+				if ctypes.windll.user32.GetForegroundWindow() != hwnd:
+					return False
+			except Exception:
+				pass
+			if targetRuntimeId is None:
+				return True
+			currentRuntimeId = _getFocusedElementRuntimeId()
+			return currentRuntimeId is None or currentRuntimeId == targetRuntimeId
+
+		def _logAndAbortIfStale(stage):
+			if _isCurrentRequest():
+				return False
+			log.debug(
+				f"LINE: messageContextMenu abandoning stale request during "
+				f"{stage}; requestId={requestId}, currentRequestId={_messageContextMenuRequestId}, "
+				f"targetRuntimeId={targetRuntimeId}, currentRuntimeId={_getFocusedElementRuntimeId()}"
+			)
+			return True
+
+		def _popupLooksLikeMessageContextMenu(popupRect):
+			left, top, right, bottom = popupRect
+			popupW = right - left
+			popupH = bottom - top
+			if popupW <= 0 or popupH <= 0:
+				return False
+			try:
+				from ._virtualWindows import messageContextMenu as messageContextMenuModule
+
+				ocrText = appModRef._ocrWindowArea(
+					hwnd,
+					region=(left, top, popupW, popupH),
+					sync=True,
+					timeout=2.0,
+				)
+				popupLines = [
+					_removeCJKSpaces(line.strip())
+					for line in (ocrText or "").split("\n")
+					if line.strip()
+				]
+				matchedLabels = [
+					messageContextMenuModule._matchMenuLabel(line)
+					for line in popupLines
+				]
+				matchedLabels = [label for label in matchedLabels if label]
+				if matchedLabels:
+					log.info(
+						f"LINE: message context menu confirmed via popup OCR: "
+						f"lines={popupLines}, matched={matchedLabels}"
+					)
+					return True
+				log.debug(
+					f"LINE: popup OCR did not resemble a message context menu: "
+					f"{popupLines}"
+				)
+			except Exception as e:
+				log.debug(
+					f"LINE: popup OCR validation failed: {e}",
+					exc_info=True,
+				)
+			return False
+
 		clampedCenter = max(winTop + 10, min(cy, winBottom - 10))
 		elWidth = elRight - elLeft
 		clickPositions = [
@@ -6490,6 +6596,8 @@ class AppModule(appModuleHandler.AppModule):
 		appModRef = self
 
 		def _attemptAtOffset(posIdx=0):
+			if _logAndAbortIfStale(f"attemptAtOffset[{posIdx}]"):
+				return
 			if posIdx >= len(clickPositions):
 				ui.message("找不到訊息選單")
 				return
@@ -6502,6 +6610,10 @@ class AppModule(appModuleHandler.AppModule):
 			appModRef._rightClickAtPosition(clickX, clickY, hwnd)
 
 			def _findPopupAndActivate(retriesLeft=4):
+				if _logAndAbortIfStale(
+					f"findPopupAndActivate[{posIdx}] retriesLeft={retriesLeft}"
+				):
+					return
 				try:
 					import ctypes.wintypes as wintypes
 
@@ -6573,6 +6685,10 @@ class AppModule(appModuleHandler.AppModule):
 								lambda: _findPopupAndActivate(retriesLeft - 1),
 							)
 							return
+						core.callLater(
+							300,
+							lambda: _attemptAtOffset(posIdx + 1),
+						)
 						return
 
 					try:
@@ -6610,10 +6726,23 @@ class AppModule(appModuleHandler.AppModule):
 						idx += 1
 
 					if itemCount < 3:
-						# Wrong menu (e.g. 全選), dismiss and try next
 						log.debug(
-							f"LINE: context menu has only {itemCount} items, "
-							f"dismissing and trying next position"
+							f"LINE: context menu has only {itemCount} UIA items; "
+							f"validating popup via OCR before dismissing"
+						)
+
+					eRect = element.CurrentBoundingRectangle
+					popupRect = (
+						int(eRect.left),
+						int(eRect.top),
+						int(eRect.right),
+						int(eRect.bottom),
+					)
+					if itemCount < 3 and not _popupLooksLikeMessageContextMenu(popupRect):
+						# Wrong menu (e.g. 全選), dismiss and try next.
+						log.debug(
+							f"LINE: popup OCR did not confirm a message context menu "
+							f"at {popupRect}; dismissing and trying next position"
 						)
 						from keyboardHandler import KeyboardInputGesture
 						KeyboardInputGesture.fromName("escape").send()
@@ -6623,13 +6752,6 @@ class AppModule(appModuleHandler.AppModule):
 						)
 						return
 
-					eRect = element.CurrentBoundingRectangle
-					popupRect = (
-						int(eRect.left),
-						int(eRect.top),
-						int(eRect.right),
-						int(eRect.bottom),
-					)
 					popupRowRects = _collectPopupMenuRowRects(
 						popupHwnd,
 						popupRect,
@@ -6640,6 +6762,15 @@ class AppModule(appModuleHandler.AppModule):
 					)
 
 					from ._virtualWindows.messageContextMenu import MessageContextMenu
+					if _logAndAbortIfStale(
+						f"beforeVirtualWindow[{posIdx}]"
+					):
+						try:
+							from keyboardHandler import KeyboardInputGesture
+							KeyboardInputGesture.fromName("escape").send()
+						except Exception:
+							pass
+						return
 					VirtualWindow.currentWindow = MessageContextMenu(
 						popupRect,
 						rowRects=popupRowRects,
