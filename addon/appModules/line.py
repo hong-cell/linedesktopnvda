@@ -308,6 +308,12 @@ _lastRawFocusedElement = None
 # Tracks the newest async request for opening the message context menu so
 # stale callLater callbacks do not speak after the user has moved on.
 _messageContextMenuRequestId = 0
+# Tracks the newest async request for copy-first message reading.
+_copyReadRequestId = 0
+# Owns clipboard restore for the active copy-read request.
+_copyReadClipboardOwnerId = 0
+# Debounces delayed focus queries after navigation gestures.
+_focusQueryRequestId = 0
 
 # Chat list navigation state.
 # When True, up/down arrows will be handled as chat list navigation
@@ -322,6 +328,20 @@ _currentChatRoomName = None
 
 # Flag to suppress addon while a file dialog is open
 _suppressAddon = False
+
+_NOTES_WINDOW_KEYWORDS = ("記事本", "note", "keep", "ノート", "บันทึก", "노트")
+_NOTES_OCR_KEYWORDS = (
+	"記事本", "相簿", "已儲存",
+	"note", "album", "saved", "keep",
+	"ノート", "アルバム", "保存済み",
+	"บันทึก", "노트",
+)
+_NOTES_OCR_CACHE_TTL = 3.0
+_notesWindowDetectionCache = {
+	"key": None,
+	"expiresAt": 0.0,
+	"isNotesWindow": False,
+}
 
 # Recursion guard to prevent infinite _get_name → _getDeepText → _get_name loops
 # Uses UIA runtime IDs (stable across Python wrapper recreation) instead of id(self)
@@ -356,6 +376,255 @@ def _getDpiScale(hwnd=None):
 	log.debug(f"LINE: DPI={dpi}, scale={scale:.2f}")
 	return scale
 
+
+
+def _scheduleQueryAndSpeakUIAFocus(delay=100):
+	"""Schedule a focus query, dropping stale callbacks when navigation repeats quickly."""
+	global _focusQueryRequestId
+	_invalidateActiveCopyRead()
+	_focusQueryRequestId += 1
+	requestId = _focusQueryRequestId
+
+	def _run():
+		if requestId != _focusQueryRequestId:
+			return
+		_queryAndSpeakUIAFocus()
+
+	core.callLater(delay, _run)
+
+
+def _invalidateActiveCopyRead():
+	"""Expire any in-flight copy-read chain before new focus work begins."""
+	global _copyReadRequestId
+	_copyReadRequestId += 1
+
+
+def _getForegroundWindowInfo():
+	"""Return foreground hwnd, lowercased title, and screen rect."""
+	try:
+		hwnd = ctypes.windll.user32.GetForegroundWindow()
+		if not hwnd:
+			return None, "", None
+		buf = ctypes.create_unicode_buffer(512)
+		ctypes.windll.user32.GetWindowTextW(hwnd, buf, 512)
+		rect = ctypes.wintypes.RECT()
+		ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+		return hwnd, (buf.value or "").lower(), (
+			int(rect.left),
+			int(rect.top),
+			int(rect.right),
+			int(rect.bottom),
+		)
+	except Exception:
+		return None, "", None
+
+
+def _rectsIntersect(rectA, rectB):
+	if not rectA or not rectB:
+		return False
+	return not (
+		rectA[2] <= rectB[0]
+		or rectA[0] >= rectB[2]
+		or rectA[3] <= rectB[1]
+		or rectA[1] >= rectB[3]
+	)
+
+
+def _isRectVisibleInForegroundWindow(left, top, right, bottom):
+	"""Return True when a screen rect overlaps the current foreground window."""
+	_fgHwnd, _fgTitle, fgRect = _getForegroundWindowInfo()
+	if not fgRect:
+		return True
+	return _rectsIntersect((left, top, right, bottom), fgRect)
+
+
+def _getEditPlaceholder(element):
+	"""Extract placeholder or current text hints from an edit control."""
+	placeholder = ""
+	try:
+		name = element.CurrentName
+		if name and name.strip() and name.strip().lower() not in ("line",):
+			placeholder = name.strip().lower()
+	except Exception:
+		pass
+	if not placeholder:
+		try:
+			val = element.GetCurrentPropertyValue(30045)
+			if val and isinstance(val, str) and val.strip():
+				placeholder = val.strip().lower()
+		except Exception:
+			pass
+	if not placeholder:
+		try:
+			desc = element.GetCurrentPropertyValue(30159)
+			if desc and isinstance(desc, str) and desc.strip():
+				placeholder = desc.strip().lower()
+		except Exception:
+			pass
+	return placeholder
+
+
+def _matchMessageContextMenuLabel(text):
+	"""Map OCR text to a known LINE message context-menu label."""
+	try:
+		from ._virtualWindows import messageContextMenu as messageContextMenuModule
+		return messageContextMenuModule._matchMenuLabel(text)
+	except Exception:
+		return None
+
+
+def _extractMatchedMessageContextMenuLabels(ocrText):
+	"""Return OCR lines plus any labels that look like real message menu items."""
+	popupLines = [
+		_removeCJKSpaces(line.strip())
+		for line in (ocrText or "").split("\n")
+		if line.strip()
+	]
+	lineMatches = []
+	matchedLabels = []
+	for line in popupLines:
+		label = _matchMessageContextMenuLabel(line)
+		lineMatches.append((line, label))
+		if label:
+			matchedLabels.append(label)
+	return popupLines, lineMatches, matchedLabels
+
+
+def _isNotesWindowContext(element, walker, allowOcr=True):
+	"""Detect whether the foreground LINE window is currently showing a notes panel."""
+	global _notesWindowDetectionCache
+	hwnd, windowTitle, windowRect = _getForegroundWindowInfo()
+	isNotesWindow = any(kw in windowTitle for kw in _NOTES_WINDOW_KEYWORDS)
+
+	if not isNotesWindow:
+		try:
+			ancestor = element
+			for _depth in range(5):
+				ancestor = walker.GetParentElement(ancestor)
+				if not ancestor:
+					break
+				try:
+					ancestorName = ancestor.CurrentName
+					if ancestorName and isinstance(ancestorName, str):
+						ancestorNameLower = ancestorName.strip().lower()
+						if any(kw in ancestorNameLower for kw in _NOTES_WINDOW_KEYWORDS):
+							isNotesWindow = True
+							log.info(
+								f"LINE: Detected notes window via UIA ancestor name: "
+								f"{ancestorName!r}"
+							)
+							break
+				except Exception:
+					continue
+		except Exception:
+			log.debug("LINE: UIA ancestor notes detection failed", exc_info=True)
+
+	cacheKey = None
+	if hwnd and windowRect:
+		cacheKey = (int(hwnd), windowTitle, windowRect)
+		cache = _notesWindowDetectionCache
+		if (
+			not isNotesWindow
+			and cache["key"] == cacheKey
+			and cache["expiresAt"] > time.monotonic()
+		):
+			return cache["isNotesWindow"], windowTitle
+
+	if isNotesWindow or not allowOcr or not cacheKey or not windowRect:
+		return isNotesWindow, windowTitle
+
+	left, top, right, bottom = windowRect
+	winWidth = right - left
+	winHeight = bottom - top
+	try:
+		if winWidth > 0 and winHeight > 0:
+			log.debug(
+				f"LINE: Attempting OCR notes detection, window size: "
+				f"{winWidth}x{winHeight}"
+			)
+			ocrWidth = winWidth
+			ocrHeight = int(winHeight * 0.20)
+			ocrLeft = left
+			ocrTop = top
+			log.debug(
+				f"LINE: OCR region: left={ocrLeft}, top={ocrTop}, "
+				f"width={ocrWidth}, height={ocrHeight}"
+			)
+
+			import screenBitmap
+			from contentRecog import uwpOcr
+			import threading
+
+			langs = uwpOcr.getLanguages()
+			if langs:
+				ocrLang = None
+				for candidate in ["zh-Hant-TW", "zh-TW", "zh-Hant"]:
+					if candidate in langs:
+						ocrLang = candidate
+						break
+				if not ocrLang:
+					for lang in langs:
+						if lang.startswith("zh"):
+							ocrLang = lang
+							break
+				if not ocrLang:
+					ocrLang = langs[0]
+				log.debug(f"LINE: Using OCR language: {ocrLang}")
+
+				sb = screenBitmap.ScreenBitmap(ocrWidth, ocrHeight)
+				pixels = sb.captureImage(ocrLeft, ocrTop, ocrWidth, ocrHeight)
+				recognizer = uwpOcr.UwpOcr(language=ocrLang)
+				resultHolder = [None]
+				event = threading.Event()
+
+				class _ImgInfo:
+					def __init__(self, w, h):
+						self.recogWidth = w
+						self.recogHeight = h
+						self.resizeFactor = 1
+
+					def convertXToScreen(self, x):
+						return ocrLeft + x
+
+					def convertYToScreen(self, y):
+						return ocrTop + y
+
+					def convertWidthToScreen(self, w):
+						return w
+
+					def convertHeightToScreen(self, h):
+						return h
+
+				def _onOcr(result):
+					resultHolder[0] = result
+					event.set()
+
+				recognizer.recognize(pixels, _ImgInfo(ocrWidth, ocrHeight), _onOcr)
+				event.wait(timeout=2.0)
+				result = resultHolder[0]
+				if result and not isinstance(result, Exception):
+					ocrText = getattr(result, 'text', '') or ''
+					ocrText = _removeCJKSpaces(ocrText.strip())
+					log.debug(f"LINE: OCR result text: {ocrText!r}")
+					isNotesWindow = any(kw in ocrText.lower() for kw in _NOTES_OCR_KEYWORDS)
+					if isNotesWindow:
+						log.info(f"LINE: Detected notes window via OCR: {ocrText!r}")
+					else:
+						log.debug("LINE: No notes keywords found in OCR text")
+				else:
+					log.debug(f"LINE: OCR returned no result or error: {result}")
+			else:
+				log.debug("LINE: No OCR languages available")
+	except Exception:
+		log.debug("LINE: notes window OCR detection failed", exc_info=True)
+	finally:
+		_notesWindowDetectionCache = {
+			"key": cacheKey,
+			"expiresAt": time.monotonic() + _NOTES_OCR_CACHE_TTL,
+			"isNotesWindow": isNotesWindow,
+		}
+
+	return isNotesWindow, windowTitle
 
 
 def _getTextViaUIAFindAll(obj, maxElements=30):
@@ -643,8 +912,16 @@ def _ocrReadElementText(rawElement, appModuleRef=None, preferCallAnnouncement=Fa
 		top = int(rect.top)
 		width = int(rect.right - rect.left)
 		height = int(rect.bottom - rect.top)
+		right = int(rect.right)
+		bottom = int(rect.bottom)
 
 		if width <= 0 or height <= 0:
+			return
+		if not _isRectVisibleInForegroundWindow(left, top, right, bottom):
+			log.debug(
+				f"LINE OCR skipped for off-window element at "
+				f"({left},{top}) {width}x{height}"
+			)
 			return
 
 		import screenBitmap
@@ -1190,7 +1467,7 @@ def _isInChatListContext(handler):
 
 		# Check if focus is on the search edit field (near a list)
 		if ct == 50004:  # Edit control
-			label = _detectEditFieldLabel(rawElement, handler)
+			label = _detectEditFieldLabel(rawElement, handler, allowNotesOcr=False)
 			# If focus is on message input, we're NOT in chat list context
 			# Translators: Label for the LINE message input field
 			if label == _("Message input"):
@@ -1309,42 +1586,29 @@ def _tryCacheSearchField(handler, listElement):
 		pass
 
 
-def _detectEditFieldLabel(element, handler):
-	"""Detect the type of a raw UIA edit element and return an appropriate label.
-
-	Checks for:
-	1. Login context (>=2 sibling edit controls) → 'Email' / 'Password'
-	2. Notes search field (window title contains notes keywords) → 'Search notes content'
-	3. Search field (placeholder text or position in left sidebar) → 'Search chat rooms'
-	4. Message input (placeholder text or position in right/bottom area) → 'Message input'
-
-	Returns the label string, or '' if the field cannot be identified.
-	"""
+def _detectEditFieldLabel(element, handler, allowNotesOcr=True):
+	"""Detect the type of a raw UIA edit element and return an appropriate label."""
 	try:
-		# Walk up to find the parent element
 		walker = handler.clientObject.RawViewWalker
 		parentEl = walker.GetParentElement(element)
 		if not parentEl:
 			return ""
 
-		# Count sibling edit fields (UIA ControlType 50004 = Edit)
 		editCondition = handler.clientObject.CreatePropertyCondition(
-			30003,  # UIA_ControlTypePropertyId
-			50004   # UIA_EditControlTypeId
+			30003,
+			50004,
 		)
 		editElements = parentEl.FindAll(
 			UIAHandler.TreeScope_Children,
-			editCondition
+			editCondition,
 		)
 		editCount = editElements.Length if editElements else 0
 
-		# --- Login context: >=2 sibling edit fields ---
 		if editCount >= 2:
 			try:
 				myRect = element.CurrentBoundingRectangle
 				myTop = myRect.top
 			except Exception:
-				# Translators: Generic label for a login field when position cannot be determined
 				return _("Login field")
 
 			editTops = []
@@ -1357,210 +1621,30 @@ def _detectEditFieldLabel(element, handler):
 
 			if len(editTops) >= 2:
 				if myTop <= min(editTops):
-					# Translators: Label for the email input field on the LINE login screen
 					return _("Email")
-				else:
-					# Translators: Label for the password input field on the LINE login screen
-					return _("Password")
-
-			# Translators: Generic label for a login field when position cannot be determined
+				return _("Password")
 			return _("Login field")
 
-		# --- Check window title to detect notes context ---
+		placeholder = _getEditPlaceholder(element)
+		searchKeywords = ("搜尋", "search", "検索", "ค้นหา", "찾기")
+		messageKeywords = ("輸入訊息", "message", "メッセージ", "ข้อความ", "입력")
+		hasSearchHint = bool(
+			placeholder and any(kw in placeholder for kw in searchKeywords)
+		)
+		hasMessageHint = bool(
+			placeholder and any(kw in placeholder for kw in messageKeywords)
+		)
+
 		windowTitle = ""
-		try:
-			hwnd = ctypes.windll.user32.GetForegroundWindow()
-			if hwnd:
-				buf = ctypes.create_unicode_buffer(512)
-				ctypes.windll.user32.GetWindowTextW(hwnd, buf, 512)
-				windowTitle = (buf.value or "").lower()
-		except Exception:
-			pass
-
-		# Notes window keywords (check for notes/Keep in window title)
-		NOTES_KEYWORDS = ("記事本", "note", "keep", "ノート", "บันทึก", "노트")
-		isNotesWindow = any(kw in windowTitle for kw in NOTES_KEYWORDS)
-
-		# Additional check 1: Walk UIA ancestors to find notes keywords in element names
-		# The notes panel often has a parent/ancestor element whose name contains notes text.
-		if not isNotesWindow:
-			try:
-				ancestor = element
-				for _depth in range(5):
-					ancestor = walker.GetParentElement(ancestor)
-					if not ancestor:
-						break
-					try:
-						ancestorName = ancestor.CurrentName
-						if ancestorName and isinstance(ancestorName, str):
-							ancestorNameLower = ancestorName.strip().lower()
-							if any(kw in ancestorNameLower for kw in NOTES_KEYWORDS):
-								isNotesWindow = True
-								log.info(f"LINE: Detected notes window via UIA ancestor name: {ancestorName!r}")
-								break
-					except Exception:
-						continue
-			except Exception:
-				log.debug("LINE: UIA ancestor notes detection failed", exc_info=True)
-		
-		# Additional check 2: Use OCR on the top area to detect notes tabs/header
-		if not isNotesWindow:
-			try:
-				hwnd = ctypes.windll.user32.GetForegroundWindow()
-				if hwnd:
-					# Get window rect
-					wndRect = ctypes.wintypes.RECT()
-					ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(wndRect))
-					winWidth = wndRect.right - wndRect.left
-					winHeight = wndRect.bottom - wndRect.top
-					
-					log.debug(f"LINE: Attempting OCR notes detection, window size: {winWidth}x{winHeight}")
-					
-					if winWidth > 0 and winHeight > 0:
-						# OCR the full-width top area (100% width, top 20%)
-						# to capture notes header/title that may appear anywhere
-						ocrWidth = winWidth
-						ocrHeight = int(winHeight * 0.20)
-						ocrLeft = wndRect.left
-						ocrTop = wndRect.top
-						
-						log.debug(f"LINE: OCR region: left={ocrLeft}, top={ocrTop}, width={ocrWidth}, height={ocrHeight}")
-						
-						# Quick OCR check
-						import screenBitmap
-						from contentRecog import uwpOcr
-						
-						langs = uwpOcr.getLanguages()
-						if langs:
-							ocrLang = None
-							for candidate in ["zh-Hant-TW", "zh-TW", "zh-Hant"]:
-								if candidate in langs:
-									ocrLang = candidate
-									break
-							if not ocrLang:
-								for lang in langs:
-									if lang.startswith("zh"):
-										ocrLang = lang
-										break
-							if not ocrLang:
-								ocrLang = langs[0]
-							
-							log.debug(f"LINE: Using OCR language: {ocrLang}")
-							
-							sb = screenBitmap.ScreenBitmap(ocrWidth, ocrHeight)
-							pixels = sb.captureImage(ocrLeft, ocrTop, ocrWidth, ocrHeight)
-							
-							recognizer = uwpOcr.UwpOcr(language=ocrLang)
-							
-							# Synchronous OCR for quick detection
-							import threading
-							resultHolder = [None]
-							event = threading.Event()
-							
-							class _ImgInfo:
-								def __init__(self, w, h):
-									self.recogWidth = w
-									self.recogHeight = h
-									self.resizeFactor = 1
-								def convertXToScreen(self, x):
-									return ocrLeft + x
-								def convertYToScreen(self, y):
-									return ocrTop + y
-								def convertWidthToScreen(self, w):
-									return w
-								def convertHeightToScreen(self, h):
-									return h
-							
-							imgInfo = _ImgInfo(ocrWidth, ocrHeight)
-							
-							def _onOcr(result):
-								resultHolder[0] = result
-								event.set()
-							
-							recognizer.recognize(pixels, imgInfo, _onOcr)
-							event.wait(timeout=2.0)
-							
-							result = resultHolder[0]
-							if result and not isinstance(result, Exception):
-								ocrText = getattr(result, 'text', '') or ''
-								ocrText = ocrText.strip()
-								# Windows OCR inserts spaces between CJK chars
-								# e.g. '記 事 本' → '記事本'
-								ocrText = _removeCJKSpaces(ocrText)
-								
-								log.debug(f"LINE: OCR result text: {ocrText!r}")
-								
-								# Check for notes-specific keywords
-								# Includes tab texts and notes header/title keywords
-								NOTES_OCR_KEYWORDS = [
-									"記事本", "相簿", "已儲存",
-									"note", "album", "saved", "keep",
-									"ノート", "アルバム", "保存済み",
-									"บันทึก", "노트",
-								]
-								if any(kw in ocrText.lower() for kw in NOTES_OCR_KEYWORDS):
-									isNotesWindow = True
-									log.info(f"LINE: Detected notes window via OCR: {ocrText!r}")
-								else:
-									log.debug(f"LINE: No notes keywords found in OCR text")
-							else:
-								log.debug(f"LINE: OCR returned no result or error: {result}")
-						else:
-							log.debug("LINE: No OCR languages available")
-			except Exception:
-				log.debug("LINE: notes window OCR detection failed", exc_info=True)
-
-		# --- Single edit field: detect search vs message input ---
-		# Strategy 1: Try reading UIA Name or Value for placeholder/content clues
-		placeholder = ""
-		try:
-			name = element.CurrentName
-			if name and name.strip() and name.strip().lower() not in ("line",):
-				placeholder = name.strip().lower()
-		except Exception:
-			pass
-		if not placeholder:
-			# Try UIA ValueValue (30045) for placeholder text
-			try:
-				val = element.GetCurrentPropertyValue(30045)
-				if val and isinstance(val, str) and val.strip():
-					placeholder = val.strip().lower()
-			except Exception:
-				pass
-		if not placeholder:
-			# Try FullDescription (30159)
-			try:
-				desc = element.GetCurrentPropertyValue(30159)
-				if desc and isinstance(desc, str) and desc.strip():
-					placeholder = desc.strip().lower()
-			except Exception:
-				pass
-
-		# Check placeholder text for search keywords
-		SEARCH_KEYWORDS = ("搜尋", "search", "検索", "ค้นหา", "찾기")
-		MESSAGE_KEYWORDS = ("輸入訊息", "message", "メッセージ", "ข้อความ", "입력")
-		if placeholder:
-			if any(kw in placeholder for kw in SEARCH_KEYWORDS):
-				# If in notes window, return notes search label
-				if isNotesWindow:
-					# Translators: Label for the search notes content field in LINE
-					return _("Search notes content")
-				# Otherwise, return chat rooms search label
-				# Translators: Label for the search chat rooms field in LINE
-				return _("Search chat rooms")
-			if any(kw in placeholder for kw in MESSAGE_KEYWORDS):
-				# Translators: Label for the LINE message input field
-				return _("Message input")
-
-		# Strategy 2: Use horizontal position relative to the LINE window
-		# Search field is in the left sidebar, message input is in the right chat area
+		isNotesWindow = False
+		positionSuggestsSearch = False
+		positionSuggestsMessage = False
 		try:
 			myRect = element.CurrentBoundingRectangle
 			myLeft = myRect.left
 			myTop = myRect.top
 			myBottom = myRect.bottom
 
-			# Get the LINE window bounds
 			hwnd = ctypes.windll.user32.GetForegroundWindow()
 			wndRect = ctypes.wintypes.RECT()
 			ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(wndRect))
@@ -1568,35 +1652,45 @@ def _detectEditFieldLabel(element, handler):
 			wndHeight = wndRect.bottom - wndRect.top
 
 			if wndWidth > 0 and wndHeight > 0:
-				# Relative position of the edit field within the window
 				relativeX = (myLeft - wndRect.left) / wndWidth
 				relativeY = (myTop - wndRect.top) / wndHeight
 				relativeBottom = (myBottom - wndRect.top) / wndHeight
-
-				log.debug(
-					f"LINE edit field position: relX={relativeX:.2f}, "
-					f"relY={relativeY:.2f}, relBottom={relativeBottom:.2f}, "
-					f"windowTitle={windowTitle!r}, isNotesWindow={isNotesWindow}"
+				positionSuggestsSearch = relativeX < 0.5 and relativeY < 0.3
+				positionSuggestsMessage = (
+					relativeX >= 0.5 or relativeBottom > 0.7
 				)
-
-				# Search field: in the left sidebar (< 50% of window width)
-				# and near the top of the window
-				if relativeX < 0.5 and relativeY < 0.3:
-					# If in notes window, return notes search label
-					if isNotesWindow:
-						# Translators: Label for the search notes content field in LINE
-						return _("Search notes content")
-					# Otherwise, return chat rooms search label
-					# Translators: Label for the search chat rooms field in LINE
-					return _("Search chat rooms")
-
-				# Message input: in the right area (>= 50% of window width)
-				# and near the bottom of the window
-				if relativeX >= 0.5 or relativeBottom > 0.7:
-					# Translators: Label for the LINE message input field
-					return _("Message input")
 		except Exception:
 			log.debug("_detectEditFieldLabel position detection failed", exc_info=True)
+
+		if hasMessageHint or (positionSuggestsMessage and not hasSearchHint):
+			return _("Message input")
+
+		needsSearchLabel = hasSearchHint or positionSuggestsSearch
+		if needsSearchLabel:
+			hasQueryLikeText = bool(
+				placeholder and not hasSearchHint and not hasMessageHint
+			)
+			needsNotesOcr = allowNotesOcr and not hasQueryLikeText
+			isNotesWindow, windowTitle = _isNotesWindowContext(
+				element,
+				walker,
+				allowOcr=needsNotesOcr,
+			)
+			log.debug(
+				f"LINE edit field classification: placeholder={placeholder!r}, "
+				f"windowTitle={windowTitle!r}, isNotesWindow={isNotesWindow}, "
+				f"searchHint={hasSearchHint}, messageHint={hasMessageHint}, "
+				f"queryLikeText={hasQueryLikeText}, "
+				f"notesOcrEnabled={needsNotesOcr}, "
+				f"positionSuggestsSearch={positionSuggestsSearch}, "
+				f"positionSuggestsMessage={positionSuggestsMessage}"
+			)
+			if isNotesWindow:
+				return _("Search notes content")
+			return _("Search chat rooms")
+
+		if positionSuggestsMessage:
+			return _("Message input")
 
 		return ""
 	except Exception:
@@ -1777,6 +1871,7 @@ def _copyAndReadMessage(targetElement):
 	Falls back to OCR (with ocr.wav sound alert) if copy fails.
 	Restores the original clipboard content after reading.
 	"""
+	global _copyReadRequestId, _copyReadClipboardOwnerId
 	try:
 		rect = targetElement.CurrentBoundingRectangle
 		cx = int((rect.left + rect.right) / 2)
@@ -1791,6 +1886,9 @@ def _copyAndReadMessage(targetElement):
 		return
 
 	hwnd = ctypes.windll.user32.GetForegroundWindow()
+	_copyReadRequestId += 1
+	requestId = _copyReadRequestId
+	targetRuntimeId = _getElementRuntimeId(targetElement)
 
 	# Save current clipboard content
 	origClip = None
@@ -1801,6 +1899,7 @@ def _copyAndReadMessage(targetElement):
 
 	# Clear clipboard so we can detect if copy succeeded
 	try:
+		_copyReadClipboardOwnerId = requestId
 		api.copyToClip("")
 	except Exception:
 		pass
@@ -1857,8 +1956,38 @@ def _copyAndReadMessage(targetElement):
 	selectAllCount = [0]  # mutable counter for ≤2-item menus
 	messageOcrCache = {"done": False, "text": ""}
 
+	def _isCurrentRequest():
+		if requestId != _copyReadRequestId:
+			return False
+		try:
+			if ctypes.windll.user32.GetForegroundWindow() != hwnd:
+				return False
+		except Exception:
+			pass
+		if targetRuntimeId is None:
+			return True
+		currentRuntimeId = _getFocusedElementRuntimeId()
+		return currentRuntimeId is None or currentRuntimeId == targetRuntimeId
+
+	def _abortIfStale(stage, restoreClipboard=False, dismissMenu=False):
+		if _isCurrentRequest():
+			return False
+		log.debug(
+			f"LINE: abandoning stale copy-read during {stage}; "
+			f"requestId={requestId}, currentRequestId={_copyReadRequestId}, "
+			f"targetRuntimeId={targetRuntimeId}, "
+			f"currentRuntimeId={_getFocusedElementRuntimeId()}"
+		)
+		if dismissMenu:
+			_dismissMenu()
+		if restoreClipboard:
+			_restoreClipboard(origClip)
+		return True
+
 	def _getMessageOcrText():
 		"""OCR the message bubble to detect file/voice message hints."""
+		if _abortIfStale("message OCR", restoreClipboard=True):
+			return ""
 		if messageOcrCache["done"]:
 			return messageOcrCache["text"]
 		messageOcrCache["done"] = True
@@ -1960,6 +2089,8 @@ def _copyAndReadMessage(targetElement):
 
 	def _attemptCopyAtOffset(posIdx=0):
 		"""Right-click at clickPositions[posIdx] and try to copy."""
+		if _abortIfStale("attemptCopyAtOffset", restoreClipboard=True):
+			return
 		if posIdx >= len(clickPositions):
 			# All positions exhausted — fall back to OCR
 			log.info("LINE: copy-read all positions failed, falling back to OCR")
@@ -1972,6 +2103,8 @@ def _copyAndReadMessage(targetElement):
 			f"LINE: copy-read right-clicking at "
 			f"({clickX}, {clickY}) [{posLabel}]"
 		)
+		if _abortIfStale("right click", restoreClipboard=True):
+			return
 
 		# Perform right-click
 		if hwnd:
@@ -1987,6 +2120,8 @@ def _copyAndReadMessage(targetElement):
 
 	def _findCopyMenuItem(posIdx, retriesLeft=4):
 		"""Find the context menu and click Copy."""
+		if _abortIfStale("findCopyMenuItem", restoreClipboard=True, dismissMenu=True):
+			return
 		try:
 			uiaHandler = UIAHandler.handler
 			if not uiaHandler:
@@ -2142,6 +2277,7 @@ def _copyAndReadMessage(targetElement):
 
 			# Strategy 2: OCR the popup when UIA text is all empty
 			popupOcrText = ""
+			popupOcrMatchedLabels = []
 			if not copyItem and menuItems and len(menuItems) >= 3:
 				log.debug("LINE: copy-read no UIA text, trying popup OCR")
 				try:
@@ -2220,12 +2356,14 @@ def _copyAndReadMessage(targetElement):
 								ocrText = _removeCJKSpaces(ocrText.strip())
 
 							popupOcrText = ocrText
+							popupLines, popupLineMatches, popupOcrMatchedLabels = (
+								_extractMatchedMessageContextMenuLabels(ocrText)
+							)
 							log.debug(f"LINE: copy-read popup OCR: {ocrText!r}")
-							if ocrText and "複製" in ocrText:
-								lines = ocrText.split("\n")
+							if "複製" in popupOcrMatchedLabels:
 								targetLineIdx = -1
-								for li, line in enumerate(lines):
-									if "複製" in line:
+								for li, (_line, label) in enumerate(popupLineMatches):
+									if label == "複製":
 										targetLineIdx = li
 										break
 								if targetLineIdx >= 0:
@@ -2236,6 +2374,11 @@ def _copyAndReadMessage(targetElement):
 										f"LINE: copy-read matched '複製' via popup OCR, "
 										f"line {targetLineIdx} → item {itemIdx}/{nItems}"
 									)
+							elif ocrText:
+								log.debug(
+									f"LINE: copy-read popup OCR did not resemble a message "
+									f"context menu: {popupLines}"
+								)
 				except Exception as e:
 					log.debug(
 						f"LINE: copy-read popup OCR failed: {e}",
@@ -2244,11 +2387,13 @@ def _copyAndReadMessage(targetElement):
 
 			# Detect file / voice messages when Copy is unavailable
 			if not copyItem and menuItems and len(menuItems) >= 3:
+				popupOcrLooksLikeMenu = bool(popupOcrMatchedLabels)
+
 				def _menuHasText(keyword):
 					for _item, text in menuItems:
 						if text and keyword in text:
 							return True
-					if popupOcrText and keyword in popupOcrText:
+					if popupOcrLooksLikeMenu and popupOcrText and keyword in popupOcrText:
 						return True
 					return False
 
@@ -2319,7 +2464,8 @@ def _copyAndReadMessage(targetElement):
 					# the text) gives a menu with 收回 but
 					# no 複製. Try other positions first.
 					ocrHasRecall = (
-						popupOcrText
+						popupOcrLooksLikeMenu
+						and popupOcrText
 						and "收回" in popupOcrText
 					)
 					if ocrHasRecall:
@@ -2358,6 +2504,8 @@ def _copyAndReadMessage(targetElement):
 				return
 
 			# Click the Copy item
+			if _abortIfStale("clickCopyItem", restoreClipboard=True, dismissMenu=True):
+				return
 			iRect = copyItem.CurrentBoundingRectangle
 			itemCx = int((iRect.left + iRect.right) / 2)
 			itemCy = int((iRect.top + iRect.bottom) / 2)
@@ -2379,6 +2527,8 @@ def _copyAndReadMessage(targetElement):
 
 	def _readClipboardAndSpeak():
 		"""Read clipboard content and speak it."""
+		if _abortIfStale("readClipboard", restoreClipboard=True):
+			return
 		try:
 			clipText = api.getClipData()
 		except Exception:
@@ -2404,11 +2554,17 @@ def _copyAndReadMessage(targetElement):
 
 	def _restoreClipboard(original):
 		"""Restore the original clipboard content."""
+		global _copyReadClipboardOwnerId
 		try:
+			if _copyReadClipboardOwnerId != requestId:
+				return
 			if original is not None:
 				api.copyToClip(original)
 		except Exception:
 			pass
+		finally:
+			if _copyReadClipboardOwnerId == requestId:
+				_copyReadClipboardOwnerId = 0
 
 	# Start the copy-read process
 	_attemptCopyAtOffset(0)
@@ -5329,7 +5485,7 @@ class AppModule(appModuleHandler.AppModule):
 		_chatListMode = False
 		_lastOCRElement = None
 		gesture.send()
-		core.callLater(100, _queryAndSpeakUIAFocus)
+		_scheduleQueryAndSpeakUIAFocus(100)
 
 	def script_chatListArrow(self, gesture):
 		"""Navigate the chat list with up/down arrows.
@@ -5376,7 +5532,7 @@ class AppModule(appModuleHandler.AppModule):
 						except Exception:
 							log.debugWarning("Second Tab simulation failed", exc_info=True)
 						# Read the focused element after Tab x2
-						core.callLater(100, _queryAndSpeakUIAFocus)
+						_scheduleQueryAndSpeakUIAFocus(100)
 
 					core.callLater(200, _sendFirstTab)
 					return
@@ -5385,7 +5541,7 @@ class AppModule(appModuleHandler.AppModule):
 
 		# Not in chat list — pass through normally (message list, etc.)
 		gesture.send()
-		core.callLater(100, _queryAndSpeakUIAFocus)
+		_scheduleQueryAndSpeakUIAFocus(100)
 
 	# Map Control+number keys to LINE tab names
 	_TAB_NAMES = {
@@ -5438,7 +5594,7 @@ class AppModule(appModuleHandler.AppModule):
 				if rawElement:
 					ct = rawElement.CurrentControlType
 					if ct == 50004:  # Edit control
-						label = _detectEditFieldLabel(rawElement, handler)
+						label = _detectEditFieldLabel(rawElement, handler, allowNotesOcr=False)
 						log.debug(f"LINE Enter key: edit field label={label!r}")
 						if label == _("Message input"):
 							isMessageInput = True
@@ -6803,24 +6959,15 @@ class AppModule(appModuleHandler.AppModule):
 			if popupW <= 0 or popupH <= 0:
 				return False
 			try:
-				from ._virtualWindows import messageContextMenu as messageContextMenuModule
-
 				ocrText = appModRef._ocrWindowArea(
 					hwnd,
 					region=(left, top, popupW, popupH),
 					sync=True,
 					timeout=2.0,
 				)
-				popupLines = [
-					_removeCJKSpaces(line.strip())
-					for line in (ocrText or "").split("\n")
-					if line.strip()
-				]
-				matchedLabels = [
-					messageContextMenuModule._matchMenuLabel(line)
-					for line in popupLines
-				]
-				matchedLabels = [label for label in matchedLabels if label]
+				popupLines, _popupLineMatches, matchedLabels = (
+					_extractMatchedMessageContextMenuLabels(ocrText)
+				)
 				if matchedLabels:
 					log.info(
 						f"LINE: message context menu confirmed via popup OCR: "
