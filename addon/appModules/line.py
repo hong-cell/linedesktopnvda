@@ -173,6 +173,432 @@ def _getCallAnnouncementFromOcr(text):
 	return None
 
 
+def _normalizeRecallDialogLine(text):
+	"""Normalize a recall-dialog OCR/UIA line for action matching."""
+	return _removeCJKSpaces((text or "").strip()).replace(" ", "").lower()
+
+
+def _matchRecallDialogActionLabel(text):
+	"""Map a short recall-dialog action label to its canonical action name."""
+	normalized = _normalizeRecallDialogLine(text)
+	if not normalized:
+		return None
+
+	if normalized in ("無痕收回", "无痕收回"):
+		return "無痕收回"
+	if normalized.startswith("無痕收回premium") or normalized.startswith("无痕收回premium"):
+		return "無痕收回"
+	if normalized == "收回":
+		return "收回"
+	if normalized in {"取消", "關閉", "关闭"}:
+		return "取消"
+	return None
+
+
+def _extractRecallDialogActionLabels(text):
+	"""Extract actionable recall-dialog buttons from OCR text in reading order."""
+	labels = []
+	for rawLine in str(text or "").splitlines():
+		label = _matchRecallDialogActionLabel(rawLine)
+		if label and (not labels or labels[-1] != label):
+			labels.append(label)
+	return labels
+
+
+def _isModernRecallDialogText(text, actionLabels=()):
+	"""Return True when OCR hints this is the newer recall-dialog layout."""
+	actionSet = set(actionLabels or ())
+	if "無痕收回" in actionSet:
+		return True
+
+	normalized = _removeCJKSpaces(str(text or "").strip()).replace(" ", "").lower()
+	if (
+		"收回" in actionSet
+		and "取消" in actionSet
+		and any(keyword in normalized for keyword in ("關閉", "关闭"))
+		and "收回已讀訊息時" in normalized
+		and "收到通知" in normalized
+		and "有可能無法" in normalized
+	):
+		return True
+
+	return any(
+		keyword in normalized
+		for keyword in (
+			"無痕收回",
+			"无痕收回",
+			"premium",
+			"未讀訊息",
+			"未读讯息",
+			"任何提醒",
+		)
+	)
+
+
+def _isCompactModernRecallDialog(actionLabels=(), isModernDialog=False):
+	"""Return True for the newer two-button recall dialog without Premium recall."""
+	if not isModernDialog:
+		return False
+	actionSet = set(actionLabels or ())
+	return "收回" in actionSet and "取消" in actionSet and "無痕收回" not in actionSet
+
+
+def _getRecallConfirmationPrompt(availableActions, isModernDialog=False):
+	"""Return the spoken prompt for the current recall confirmation dialog."""
+	actionSet = set(availableActions or ())
+	if "無痕收回" in actionSet:
+		return _("確認要收回嗎？按 Y 收回，按 N 取消，按 P 無痕收回，需要 Premium")
+	return _("確認要收回嗎？按 Y 收回，按 N 取消")
+
+
+def _extractOcrRectLike(obj):
+	"""Extract a screen-space rectangle from a UWP OCR line/word object."""
+	for attr in ("boundingRect", "boundingRectangle", "rect", "location", "bounds"):
+		rect = getattr(obj, attr, None)
+		if not rect:
+			continue
+		left = getattr(rect, "left", getattr(rect, "x", None))
+		top = getattr(rect, "top", getattr(rect, "y", None))
+		right = getattr(rect, "right", None)
+		bottom = getattr(rect, "bottom", None)
+		if right is None and left is not None:
+			width = getattr(rect, "width", None)
+			if width is not None:
+				right = left + width
+		if bottom is None and top is not None:
+			height = getattr(rect, "height", None)
+			if height is not None:
+				bottom = top + height
+		if None not in (left, top, right, bottom):
+			return (int(left), int(top), int(right), int(bottom))
+
+	for attrs in (
+		("left", "top", "right", "bottom"),
+		("x", "y", "width", "height"),
+	):
+		values = [getattr(obj, attr, None) for attr in attrs]
+		if any(value is None for value in values):
+			continue
+		left, top, third, fourth = values
+		if attrs[2] == "right":
+			return (int(left), int(top), int(third), int(fourth))
+		return (int(left), int(top), int(left + third), int(top + fourth))
+
+	words = getattr(obj, "words", None) or []
+	wordRects = []
+	for word in words:
+		rect = _extractOcrRectLike(word)
+		if rect:
+			wordRects.append(rect)
+	if wordRects:
+		return (
+			min(rect[0] for rect in wordRects),
+			min(rect[1] for rect in wordRects),
+			max(rect[2] for rect in wordRects),
+			max(rect[3] for rect in wordRects),
+		)
+
+	return None
+
+
+def _extractOcrLines(result):
+	"""Return OCR line entries with text and optional screen rectangles."""
+	rawLines = getattr(result, "lines", None) or []
+	extracted = []
+	for rawLine in rawLines:
+		text = (getattr(rawLine, "text", "") or "").strip()
+		if not text:
+			continue
+		extracted.append({
+			"text": text,
+			"rect": _extractOcrRectLike(rawLine),
+		})
+
+	if extracted:
+		return extracted
+
+	text = _removeCJKSpaces((getattr(result, "text", "") or "").strip())
+	return [
+		{"text": line.strip(), "rect": None}
+		for line in text.splitlines()
+		if line.strip()
+	]
+
+
+def _extractRecallDialogActionClickPoints(ocrLines, dialogRect):
+	"""Map recall-dialog action labels to OCR-derived click points."""
+	if not ocrLines or not dialogRect:
+		return {}
+
+	dialogLeft, _dialogTop, dialogRight, _dialogBottom = dialogRect
+	dialogCenterX = (dialogLeft + dialogRight) / 2.0
+	matched = {}
+
+	for index, line in enumerate(ocrLines):
+		label = _matchRecallDialogActionLabel(line.get("text", ""))
+		rect = line.get("rect")
+		if not label or not rect or not _rectsIntersect(rect, dialogRect):
+			continue
+
+		rectLeft, rectTop, rectRight, rectBottom = rect
+		if rectRight <= rectLeft or rectBottom <= rectTop:
+			continue
+
+		centerX = (rectLeft + rectRight) / 2.0
+		centerY = (rectTop + rectBottom) / 2.0
+		score = (
+			centerY,
+			(rectRight - rectLeft) * (rectBottom - rectTop),
+			-abs(centerX - dialogCenterX),
+			-index,
+		)
+		current = matched.get(label)
+		if current is None or score > current["score"]:
+			matched[label] = {
+				"clickPoint": (int(centerX), int(centerY)),
+				"rect": rect,
+				"score": score,
+			}
+
+	return {
+		label: {
+			"clickPoint": data["clickPoint"],
+			"rect": data["rect"],
+		}
+		for label, data in matched.items()
+	}
+
+
+def _invokeUIAInvokePattern(pattern):
+	"""Invoke a UIA InvokePattern without relying on generated comtypes stubs."""
+	if not pattern:
+		return False
+
+	invoke = getattr(pattern, "Invoke", None)
+	if callable(invoke):
+		invoke()
+		return True
+
+	queryInterface = getattr(pattern, "QueryInterface", None)
+	if not callable(queryInterface):
+		return False
+
+	comMethod = getattr(comtypes, "COMMETHOD", None)
+	if comMethod is None:
+		from comtypes import COMMETHOD as comMethod
+
+	hresult = getattr(ctypes, "HRESULT", ctypes.c_long)
+
+	class _IUIAutomationInvokePattern(comtypes.IUnknown):
+		_iid_ = comtypes.GUID("{FB377FBE-8EA6-46D5-9C73-6499642D3059}")
+		_methods_ = [comMethod([], hresult, "Invoke")]
+
+	queryInterface(_IUIAutomationInvokePattern).Invoke()
+	return True
+
+
+def _tryInvokeUIAElement(element):
+	"""Return True when a UIA element successfully activates InvokePattern."""
+	if not element:
+		return False
+
+	pattern = element.GetCurrentPattern(10000)  # InvokePattern
+	if not pattern:
+		return False
+	return _invokeUIAInvokePattern(pattern)
+
+
+def _rectIntersectionArea(rectA, rectB):
+	"""Return the intersection area of two rectangles."""
+	if not rectA or not rectB:
+		return 0
+	left = max(rectA[0], rectB[0])
+	top = max(rectA[1], rectB[1])
+	right = min(rectA[2], rectB[2])
+	bottom = min(rectA[3], rectB[3])
+	if right <= left or bottom <= top:
+		return 0
+	return (right - left) * (bottom - top)
+
+
+def _rectIoU(rectA, rectB):
+	"""Return the overlap ratio of two rectangles."""
+	intersection = _rectIntersectionArea(rectA, rectB)
+	if intersection <= 0:
+		return 0.0
+	areaA = max((rectA[2] - rectA[0]) * (rectA[3] - rectA[1]), 1)
+	areaB = max((rectB[2] - rectB[0]) * (rectB[3] - rectB[1]), 1)
+	union = areaA + areaB - intersection
+	return float(intersection) / float(union or 1)
+
+
+def _inferRecallDialogTargetsByGeometry(candidates, dialogRect, actionLabels, isModernDialog=False):
+	"""Infer unlabeled recall-dialog button targets from geometry."""
+	if not dialogRect or not candidates:
+		return {}
+
+	actionSet = set(actionLabels or ())
+	isCompactModernDialog = _isCompactModernRecallDialog(
+		actionLabels,
+		isModernDialog=isModernDialog,
+	)
+	left, top, right, bottom = dialogRect
+	dialogWidth = right - left
+	dialogHeight = bottom - top
+	if dialogWidth <= 0 or dialogHeight <= 0:
+		return {}
+
+	dialogCenterX = left + (dialogWidth / 2.0)
+	minWidth = max(120, int(dialogWidth * 0.26))
+	minHeight = max(24, int(dialogHeight * 0.05))
+	maxHeight = max(52, int(dialogHeight * 0.20))
+	maxCenterOffset = max(90, int(dialogWidth * 0.22))
+	minCenterY = top + (dialogHeight * 0.36)
+	maxCenterY = top + (dialogHeight * 0.84)
+	expectedCenterY = top + (
+		dialogHeight
+		* (
+			0.64
+			if isCompactModernDialog
+			else 0.56
+			if isModernDialog
+			else 0.60
+		)
+	)
+
+	filtered = []
+	for candidate in candidates:
+		rect = candidate.get("rect")
+		if not rect:
+			continue
+		width = rect[2] - rect[0]
+		height = rect[3] - rect[1]
+		if width < minWidth or height < minHeight or height > maxHeight:
+			continue
+
+		centerX = (rect[0] + rect[2]) / 2.0
+		centerY = (rect[1] + rect[3]) / 2.0
+		if abs(centerX - dialogCenterX) > maxCenterOffset:
+			continue
+		if centerY < minCenterY or centerY > maxCenterY:
+			continue
+
+		score = (
+			1 if candidate.get("hasInvoke") else 0,
+			1 if candidate.get("controlType") == 50000 else 0,
+			width,
+			-abs(centerX - dialogCenterX),
+			-abs(centerY - expectedCenterY),
+		)
+		filtered.append({
+			**candidate,
+			"centerX": centerX,
+			"centerY": centerY,
+			"score": score,
+		})
+
+	if not filtered:
+		return {}
+
+	filtered.sort(key=lambda item: item["score"], reverse=True)
+	deduped = []
+	for candidate in filtered:
+		isDuplicate = False
+		for kept in deduped:
+			if (
+				_rectIoU(candidate["rect"], kept["rect"]) >= 0.55
+				or (
+					abs(candidate["centerX"] - kept["centerX"]) <= 18
+					and abs(candidate["centerY"] - kept["centerY"]) <= 18
+				)
+			):
+				isDuplicate = True
+				break
+		if not isDuplicate:
+			deduped.append(candidate)
+
+	if not deduped:
+		return {}
+
+	deduped.sort(
+		key=lambda item: (
+			item["centerY"],
+			-(item["rect"][2] - item["rect"][0]),
+		)
+	)
+
+	inferred = {}
+	if isModernDialog:
+		if isCompactModernDialog:
+			if "收回" in actionSet and len(deduped) >= 1:
+				inferred["收回"] = max(
+					deduped,
+					key=lambda item: (
+						1 if item.get("hasInvoke") else 0,
+						1 if item.get("controlType") == 50000 else 0,
+						(item["rect"][2] - item["rect"][0]) * (item["rect"][3] - item["rect"][1]),
+						-abs(item["centerY"] - expectedCenterY),
+						-abs(item["centerX"] - dialogCenterX),
+					),
+				)
+		elif "無痕收回" in actionSet and len(deduped) >= 1:
+			inferred["無痕收回"] = deduped[0]
+		if "收回" in actionSet:
+			if "無痕收回" in actionSet and len(deduped) >= 2:
+				inferred["收回"] = deduped[1]
+			elif len(deduped) >= 1 and not isCompactModernDialog:
+				inferred["收回"] = deduped[0]
+	else:
+		if "收回" in actionSet and len(deduped) >= 1:
+			inferred["收回"] = max(
+				deduped,
+				key=lambda item: (
+					(item["rect"][2] - item["rect"][0]) * (item["rect"][3] - item["rect"][1]),
+					-abs(item["centerY"] - expectedCenterY),
+				),
+			)
+
+	return inferred
+
+
+def _getRecallDialogFallbackClickPoint(
+	actionName,
+	dialogRect,
+	isModernDialog=False,
+	availableActions=(),
+):
+	"""Return a best-effort click point for the modern recall dialog buttons."""
+	if not dialogRect:
+		return None
+
+	if _isCompactModernRecallDialog(availableActions, isModernDialog=isModernDialog):
+		ratios = {
+			"收回": 0.64,
+		}
+	elif isModernDialog:
+		ratios = {
+			"無痕收回": 0.49,
+			"收回": 0.59,
+		}
+	else:
+		ratios = {
+			"收回": 0.58,
+		}
+	if actionName not in ratios:
+		return None
+
+	left, top, right, bottom = dialogRect
+	width = right - left
+	height = bottom - top
+	if width <= 0 or height <= 0:
+		return None
+
+	return (
+		int(left + width / 2),
+		int(top + height * ratios[actionName]),
+	)
+
+
 def _collectPopupMenuRowRects(
 	popupHwnd,
 	popupRect: tuple[int, int, int, int],
@@ -3586,18 +4012,14 @@ class AppModule(appModuleHandler.AppModule):
 		
 		return None
 	
-	def _invokeElement(self, element, actionName):
+	def _invokeElement(self, element, actionName, announce=True):
 		"""Invoke a UIA element using InvokePattern or mouse click fallback."""
-		import ctypes
-		
+
 		# Try InvokePattern
 		try:
-			invokePattern = element.GetCurrentPattern(10000)  # InvokePattern
-			if invokePattern:
-				invokePattern.QueryInterface(
-					comtypes.gen.UIAutomationClient.IUIAutomationInvokePattern
-				).Invoke()
-				ui.message(actionName)
+			if _tryInvokeUIAElement(element):
+				if announce:
+					ui.message(actionName)
 				return True
 		except Exception as e:
 			log.debug(f"LINE: InvokePattern failed: {e}")
@@ -3614,7 +4036,8 @@ class AppModule(appModuleHandler.AppModule):
 				import time
 				time.sleep(0.05)
 				ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # LEFTUP
-				ui.message(actionName)
+				if announce:
+					ui.message(actionName)
 				return True
 		except Exception as e:
 			log.debug(f"LINE: click fallback failed: {e}")
@@ -4267,8 +4690,8 @@ class AppModule(appModuleHandler.AppModule):
 		
 		return callHwnd
 	
-	def _ocrWindowArea(self, hwnd, region=None, sync=False, timeout=3.0):
-		"""OCR a window (or part of it) and return the recognized text.
+	def _ocrWindowAreaResult(self, hwnd, region=None, sync=False, timeout=3.0):
+		"""OCR a window (or part of it) and return the raw OCR result object.
 		
 		Args:
 			hwnd: Window handle to capture.
@@ -4278,7 +4701,7 @@ class AppModule(appModuleHandler.AppModule):
 			timeout: Max seconds to wait when sync=True.
 		
 		Returns:
-			The OCR text string, or empty string on failure.
+			The OCR result object, or None on failure.
 		"""
 		import ctypes
 		import ctypes.wintypes
@@ -4295,7 +4718,7 @@ class AppModule(appModuleHandler.AppModule):
 			left, top, width, height = region
 		
 		if width <= 0 or height <= 0:
-			return ""
+			return None
 		
 		try:
 			import screenBitmap
@@ -4319,7 +4742,7 @@ class AppModule(appModuleHandler.AppModule):
 				ocrLang = langs[0]
 			if not ocrLang:
 				log.warning("LINE: no OCR language available")
-				return ""
+				return None
 			
 			recognizer = uwpOcr.UwpOcr(language=ocrLang)
 			resizeFactor = recognizer.getResizeFactor(width, height)
@@ -4372,15 +4795,27 @@ class AppModule(appModuleHandler.AppModule):
 				
 				result = resultHolder[0]
 				if result is None or isinstance(result, Exception):
-					return ""
-				text = getattr(result, 'text', '') or ''
-				return _removeCJKSpaces(text.strip())
+					return None
+				return result
 			else:
 				# Async — not used for incoming call detection
-				return ""
+				return None
 		except Exception as e:
-			log.debug(f"LINE: _ocrWindowArea failed: {e}", exc_info=True)
+			log.debug(f"LINE: _ocrWindowAreaResult failed: {e}", exc_info=True)
+			return None
+
+	def _ocrWindowArea(self, hwnd, region=None, sync=False, timeout=3.0):
+		"""OCR a window (or part of it) and return the recognized text."""
+		result = self._ocrWindowAreaResult(
+			hwnd,
+			region=region,
+			sync=sync,
+			timeout=timeout,
+		)
+		if result is None or isinstance(result, Exception):
 			return ""
+		text = getattr(result, 'text', '') or ''
+		return _removeCJKSpaces(text.strip())
 	
 	def _getCallButtonElements(self, hwnd):
 		"""Collect UIA elements from the call window and log their properties.
@@ -4696,13 +5131,7 @@ class AppModule(appModuleHandler.AppModule):
 				el, cx, cy = result
 				invoked = False
 				try:
-					pat = el.GetCurrentPattern(10000)
-					if pat:
-						import comtypes
-						pat.QueryInterface(
-							comtypes.gen.UIAutomationClient
-							.IUIAutomationInvokePattern
-						).Invoke()
+					if _tryInvokeUIAElement(el):
 						invoked = True
 						log.info("LINE: answered via InvokePattern")
 				except Exception as e:
@@ -4814,13 +5243,7 @@ class AppModule(appModuleHandler.AppModule):
 				el, cx, cy = result
 				invoked = False
 				try:
-					pat = el.GetCurrentPattern(10000)
-					if pat:
-						import comtypes
-						pat.QueryInterface(
-							comtypes.gen.UIAutomationClient
-							.IUIAutomationInvokePattern
-						).Invoke()
+					if _tryInvokeUIAElement(el):
 						invoked = True
 						log.info("LINE: rejected via InvokePattern")
 				except Exception as e:
@@ -6718,29 +7141,319 @@ class AppModule(appModuleHandler.AppModule):
 		"""Recall (unsend) the current message via right-click context menu.
 
 		After selecting recall, LINE shows a confirmation dialog.
-		We speak a prompt and wait for user to press Y (confirm) or N (cancel).
+		We speak a prompt and wait for user to press Y (recall),
+		N (cancel), or P (stealth recall, requires Premium).
 		"""
-		self._contextMenuAction(3, "收回", afterCallback=self._beginRecallConfirmation)
+		self._contextMenuAction(
+			3,
+			"收回",
+			afterCallback=self._watchForRecallConfirmationDialog,
+		)
+
+	def _getRecallConfirmationDialogRect(self, hwnd):
+		"""Return the centered screen rect that contains the LINE recall dialog."""
+		try:
+			winRect = ctypes.wintypes.RECT()
+			ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(winRect))
+			winW = int(winRect.right - winRect.left)
+			winH = int(winRect.bottom - winRect.top)
+			if winW <= 0 or winH <= 0:
+				return None
+
+			scale = _getDpiScale(hwnd)
+			dialogW = min(int(winW * 0.82), int(520 * scale))
+			dialogH = min(int(winH * 0.74), int(430 * scale))
+			dialogW = max(dialogW, int(min(winW, 320 * scale)))
+			dialogH = max(dialogH, int(min(winH, 180 * scale)))
+			dialogLeft = int(winRect.left + (winW - dialogW) / 2)
+			dialogTop = int(winRect.top + (winH - dialogH) / 2)
+			return (
+				dialogLeft,
+				dialogTop,
+				dialogLeft + dialogW,
+				dialogTop + dialogH,
+			)
+		except Exception as e:
+			log.debug(f"LINE: failed to calculate recall dialog rect: {e}", exc_info=True)
+			return None
+
+	def _captureRecallConfirmationState(self):
+		"""Capture OCR and UIA state for the currently visible recall dialog."""
+		state = {
+			"hwnd": None,
+			"dialogRect": None,
+			"ocrText": "",
+			"actionLabels": [],
+			"targets": {},
+			"isModernDialog": False,
+		}
+		try:
+			hwnd = ctypes.windll.user32.GetForegroundWindow()
+			if not hwnd:
+				return state
+
+			dialogRect = self._getRecallConfirmationDialogRect(hwnd)
+			if not dialogRect:
+				return state
+
+			left, top, right, bottom = dialogRect
+			ocrResult = self._ocrWindowAreaResult(
+				hwnd,
+				region=(left, top, right - left, bottom - top),
+				sync=True,
+				timeout=2.0,
+			)
+			ocrText = ""
+			ocrLines = []
+			if ocrResult is not None and not isinstance(ocrResult, Exception):
+				ocrText = _removeCJKSpaces(
+					(getattr(ocrResult, "text", "") or "").strip()
+				)
+				ocrLines = _extractOcrLines(ocrResult)
+			actionLabels = _extractRecallDialogActionLabels(ocrText)
+			isModernDialog = _isModernRecallDialogText(ocrText, actionLabels)
+			ocrActionTargets = _extractRecallDialogActionClickPoints(ocrLines, dialogRect)
+
+			targetMatches = {}
+			handler = UIAHandler.handler
+			client = getattr(handler, "clientObject", None)
+			if client:
+				rootEl = client.ElementFromHandle(hwnd)
+				if rootEl:
+					allElements = self._collectAllElements(rootEl, handler)
+					dialogCenterY = (top + bottom) / 2
+					filteredElements = []
+					geometryCandidates = []
+
+					def _considerTarget(label, element, rectTuple):
+						rectWidth = rectTuple[2] - rectTuple[0]
+						rectHeight = rectTuple[3] - rectTuple[1]
+						if rectWidth <= 0 or rectHeight <= 0:
+							return
+
+						hasInvoke = 0
+						try:
+							hasInvoke = 1 if element.GetCurrentPattern(10000) else 0
+						except Exception:
+							pass
+
+						score = (
+							hasInvoke,
+							rectWidth * rectHeight,
+							-abs(((rectTuple[1] + rectTuple[3]) / 2) - dialogCenterY),
+						)
+						current = targetMatches.get(label)
+						if current is None or score > current["score"]:
+							targetMatches[label] = {
+								"score": score,
+								"element": element,
+								"rect": rectTuple,
+							}
+
+					for element in allElements:
+						try:
+							rect = element.CurrentBoundingRectangle
+							rectTuple = (
+								int(rect.left),
+								int(rect.top),
+								int(rect.right),
+								int(rect.bottom),
+							)
+						except Exception:
+							continue
+
+						if (
+							rectTuple[2] <= rectTuple[0]
+							or rectTuple[3] <= rectTuple[1]
+							or not _rectsIntersect(rectTuple, dialogRect)
+						):
+							continue
+
+						filteredElements.append(element)
+						controlType = 0
+						try:
+							controlType = element.CurrentControlType
+						except Exception:
+							pass
+						hasInvoke = False
+						try:
+							pattern = element.GetCurrentPattern(10000)
+							hasInvoke = bool(pattern)
+						except Exception:
+							pass
+						geometryCandidates.append({
+							"element": element,
+							"rect": rectTuple,
+							"controlType": controlType,
+							"hasInvoke": hasInvoke,
+						})
+						candidateTexts = []
+						try:
+							name = element.CurrentName or ""
+							if name:
+								candidateTexts.append(name)
+						except Exception:
+							pass
+						try:
+							helpText = str(element.GetCurrentPropertyValue(30048) or "")
+							if helpText:
+								candidateTexts.append(helpText)
+						except Exception:
+							pass
+						try:
+							autoId = element.CurrentAutomationId or ""
+							if autoId:
+								candidateTexts.append(autoId)
+						except Exception:
+							pass
+
+						for candidateText in candidateTexts:
+							label = _matchRecallDialogActionLabel(candidateText)
+							if label:
+								_considerTarget(label, element, rectTuple)
+								break
+
+					for label, includeKeywords, excludeKeywords in (
+						("無痕收回", ["無痕收回"], []),
+						("收回", ["收回"], ["無痕"]),
+						("取消", ["取消", "關閉", "关闭"], []),
+					):
+						if label in targetMatches or not filteredElements:
+							continue
+						element = self._findButtonByKeywords(
+							filteredElements,
+							includeKeywords,
+							excludeKeywords,
+						)
+						if not element:
+							continue
+						try:
+							rect = element.CurrentBoundingRectangle
+							rectTuple = (
+								int(rect.left),
+								int(rect.top),
+								int(rect.right),
+								int(rect.bottom),
+							)
+						except Exception:
+							continue
+						if _rectsIntersect(rectTuple, dialogRect):
+							_considerTarget(label, element, rectTuple)
+
+					for label, candidate in _inferRecallDialogTargetsByGeometry(
+						geometryCandidates,
+						dialogRect,
+						actionLabels,
+						isModernDialog=isModernDialog,
+					).items():
+						if label in targetMatches:
+							continue
+						targetMatches[label] = {
+							"score": candidate.get("score", ()),
+							"element": candidate["element"],
+							"rect": candidate["rect"],
+						}
+
+			stateTargets = {}
+			for label, target in targetMatches.items():
+				stateTargets[label] = {
+					"element": target["element"],
+					"rect": target["rect"],
+					"clickPoint": None,
+				}
+			for label, ocrTarget in ocrActionTargets.items():
+				targetInfo = stateTargets.setdefault(label, {
+					"element": None,
+					"rect": None,
+					"clickPoint": None,
+				})
+				if targetInfo.get("rect") is None and ocrTarget.get("rect") is not None:
+					targetInfo["rect"] = ocrTarget["rect"]
+				if ocrTarget.get("clickPoint") is not None:
+					targetInfo["clickPoint"] = ocrTarget["clickPoint"]
+
+			state.update({
+				"hwnd": hwnd,
+				"dialogRect": dialogRect,
+				"ocrText": ocrText,
+				"actionLabels": actionLabels,
+				"targets": stateTargets,
+				"isModernDialog": isModernDialog,
+			})
+			ocrTargetSummary = {
+				label: target["clickPoint"]
+				for label, target in sorted(ocrActionTargets.items())
+			}
+			log.debug(
+				f"LINE: recall dialog state labels={actionLabels}, "
+				f"targets={sorted(state['targets'])}, "
+				f"ocrTargets={ocrTargetSummary}, "
+				f"modern={isModernDialog}"
+			)
+		except Exception as e:
+			log.debug(f"LINE: capture recall confirmation state failed: {e}", exc_info=True)
+
+		return state
+
+	def _refreshRecallConfirmationState(self):
+		"""Merge fresh recall-dialog state into the pending confirmation session."""
+		state = self._captureRecallConfirmationState()
+		storedActions = set(getattr(self, "_recallDialogActions", ()) or ())
+		storedTargets = dict(getattr(self, "_recallDialogTargets", {}) or {})
+		storedRect = getattr(self, "_recallDialogRect", None)
+		storedHwnd = getattr(self, "_recallDialogHwnd", None)
+		storedModern = bool(getattr(self, "_recallDialogIsModern", False))
+
+		mergedActions = storedActions | set(state["actionLabels"]) | set(state["targets"])
+		if state["targets"]:
+			for label, freshTarget in state["targets"].items():
+				mergedTarget = dict(storedTargets.get(label, {}) or {})
+				for key in ("element", "rect", "clickPoint"):
+					value = freshTarget.get(key)
+					if value is not None:
+						mergedTarget[key] = value
+				storedTargets[label] = mergedTarget
+
+		self._recallDialogActions = mergedActions
+		self._recallDialogTargets = storedTargets
+		self._recallDialogRect = state["dialogRect"] or storedRect
+		self._recallDialogHwnd = state["hwnd"] or storedHwnd
+		self._recallDialogIsModern = storedModern or state["isModernDialog"]
+
+		return {
+			"hwnd": self._recallDialogHwnd,
+			"dialogRect": self._recallDialogRect,
+			"ocrText": state["ocrText"],
+			"actionLabels": list(self._recallDialogActions),
+			"targets": self._recallDialogTargets,
+			"isModernDialog": self._recallDialogIsModern,
+		}
 
 	def _beginRecallConfirmation(self):
-		"""Prompt for recall confirmation and bind Y/N shortcuts."""
+		"""Prompt for recall confirmation and bind Y/N/P shortcuts."""
+		state = self._refreshRecallConfirmationState()
+		prompt = _getRecallConfirmationPrompt(
+			state["actionLabels"],
+			isModernDialog=state["isModernDialog"],
+		)
 		if getattr(self, '_recallPending', False):
-			ui.message(_("確認要收回嗎？按 Y 確認，按 N 取消"))
+			ui.message(prompt)
 			return
 
 		token = getattr(self, '_recallConfirmationToken', 0) + 1
 		self._recallConfirmationToken = token
 		self._recallPending = True
-		ui.message(_("確認要收回嗎？按 Y 確認，按 N 取消"))
+		ui.message(prompt)
 		self.bindGesture("kb:y", "confirmRecall")
 		self.bindGesture("kb:n", "cancelRecall")
+		self.bindGesture("kb:p", "stealthRecall")
 
 		def _autoCancel():
 			if (
 				getattr(self, '_recallPending', False)
 				and getattr(self, '_recallConfirmationToken', 0) == token
 			):
-				self._endRecallConfirmation(False)
+				self._endRecallConfirmation("取消")
 
 		core.callLater(10000, _autoCancel)
 
@@ -6751,24 +7464,20 @@ class AppModule(appModuleHandler.AppModule):
 			if not hwnd:
 				return False
 
-			winRect = ctypes.wintypes.RECT()
-			ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(winRect))
-			winW = int(winRect.right - winRect.left)
-			winH = int(winRect.bottom - winRect.top)
-			if winW <= 0 or winH <= 0:
+			dialogRect = self._getRecallConfirmationDialogRect(hwnd)
+			if not dialogRect:
 				return False
 
-			scale = _getDpiScale(hwnd)
-			dialogW = min(int(winW * 0.82), int(460 * scale))
-			dialogH = min(int(winH * 0.55), int(260 * scale))
-			dialogW = max(dialogW, int(min(winW, 280 * scale)))
-			dialogH = max(dialogH, int(min(winH, 140 * scale)))
-			dialogLeft = int(winRect.left + (winW - dialogW) / 2)
-			dialogTop = int(winRect.top + (winH - dialogH) / 2)
+			dialogLeft, dialogTop, dialogRight, dialogBottom = dialogRect
 
 			ocrText = self._ocrWindowArea(
 				hwnd,
-				region=(dialogLeft, dialogTop, dialogW, dialogH),
+				region=(
+					dialogLeft,
+					dialogTop,
+					dialogRight - dialogLeft,
+					dialogBottom - dialogTop,
+				),
 				sync=True,
 				timeout=2.0,
 			)
@@ -6779,15 +7488,20 @@ class AppModule(appModuleHandler.AppModule):
 				if line.strip()
 			]
 			normalizedText = "".join(normalizedLines)
-			lineSet = set(normalizedLines)
+			actionLabels = _extractRecallDialogActionLabels(ocrText)
+			actionSet = set(actionLabels)
+			isModernDialog = _isModernRecallDialogText(ocrText, actionLabels)
 			hasButtons = (
-				{"收回", "取消"}.issubset(lineSet)
-				or ("收回" in normalizedText and "取消" in normalizedText)
+				{"收回", "取消"}.issubset(actionSet)
+				or ("收回" in normalizedText and any(label in actionSet for label in {"取消", "無痕收回"}))
 			)
 			hasRecallBody = any(
 				keyword in normalizedText
 				for keyword in (
+					"確定要收回訊息嗎",
 					"收回訊息",
+					"未讀訊息",
+					"任何提醒",
 					"可能無法",
 					"聊天室",
 					"對方",
@@ -6796,20 +7510,20 @@ class AppModule(appModuleHandler.AppModule):
 			)
 			looksLikeCompactDialog = (
 				len(normalizedLines) <= 4
-				and any(line == "收回" for line in normalizedLines)
-				and any(line == "取消" for line in normalizedLines)
+				and {"收回", "取消"}.issubset(actionSet)
 			)
 			log.debug(
 				f"LINE: recall confirmation OCR: text={ocrText!r}, "
-				f"normalizedLines={normalizedLines}"
+				f"normalizedLines={normalizedLines}, actions={actionLabels}, "
+				f"modern={isModernDialog}"
 			)
-			return hasButtons and (hasRecallBody or looksLikeCompactDialog)
+			return hasButtons and (hasRecallBody or looksLikeCompactDialog or isModernDialog)
 		except Exception as e:
 			log.debug(f"LINE: recall confirmation detection failed: {e}", exc_info=True)
 			return False
 
 	def _watchForRecallConfirmationDialog(self, retriesLeft=6, delayMs=250):
-		"""Poll briefly for the LINE recall confirmation dialog, then start Y/N mode."""
+		"""Poll briefly for the LINE recall confirmation dialog, then start Y/N/P mode."""
 		watchId = getattr(self, '_recallDialogWatchId', 0) + 1
 		self._recallDialogWatchId = watchId
 
@@ -6837,15 +7551,19 @@ class AppModule(appModuleHandler.AppModule):
 		if actionName == "收回":
 			self._watchForRecallConfirmationDialog()
 
-	def _endRecallConfirmation(self, confirmed):
-		"""End the recall confirmation and clean up Y/N bindings."""
-		if not getattr(self, '_recallPending', False):
-			return
+	def _clearRecallConfirmationBindings(self):
+		"""Clear the transient recall-confirmation bindings and cached dialog state."""
 		self._recallPending = False
+		self._recallActionInProgress = False
+		self._recallDialogActions = set()
+		self._recallDialogTargets = {}
+		self._recallDialogRect = None
+		self._recallDialogHwnd = None
+		self._recallDialogIsModern = False
 
-		# Remove dynamic Y/N gesture bindings
+		# Remove dynamic confirmation gesture bindings.
 		import inputCore
-		for key in ("kb:y", "kb:n"):
+		for key in ("kb:y", "kb:n", "kb:p"):
 			try:
 				normalized = inputCore.normalizeGestureIdentifier(key)
 				if normalized in self._gestureMap:
@@ -6853,21 +7571,131 @@ class AppModule(appModuleHandler.AppModule):
 			except Exception:
 				pass
 
-		from keyboardHandler import KeyboardInputGesture
-		if confirmed:
-			KeyboardInputGesture.fromName("enter").send()
-			ui.message(_("已收回"))
-		else:
+	def _performRecallConfirmationAction(self, actionName):
+		"""Activate a specific action on the current recall confirmation dialog."""
+		state = self._refreshRecallConfirmationState()
+		targetInfo = state["targets"].get(actionName)
+		isCompactModernDialog = _isCompactModernRecallDialog(
+			state.get("actionLabels"),
+			isModernDialog=state["isModernDialog"],
+		)
+
+		def _clickFallbackPoint():
+			fallbackPoint = _getRecallDialogFallbackClickPoint(
+				actionName,
+				state["dialogRect"],
+				isModernDialog=state["isModernDialog"],
+				availableActions=state.get("actionLabels"),
+			)
+			if not fallbackPoint:
+				return False
+			self._clickAtPosition(
+				fallbackPoint[0],
+				fallbackPoint[1],
+				hwnd=state["hwnd"],
+			)
+			log.info(
+				f"LINE: fallback-clicking recall dialog action '{actionName}' "
+				f"at ({fallbackPoint[0]}, {fallbackPoint[1]})"
+			)
+			return True
+
+		if targetInfo:
+			clickPoint = targetInfo.get("clickPoint")
+			if clickPoint:
+				log.info(
+					f"LINE: OCR-clicking recall dialog action '{actionName}' "
+					f"at ({clickPoint[0]}, {clickPoint[1]})"
+				)
+				self._clickAtPosition(
+					clickPoint[0],
+					clickPoint[1],
+					hwnd=state["hwnd"],
+				)
+				return True
+			if isCompactModernDialog and actionName == "收回" and _clickFallbackPoint():
+				return True
+			element = targetInfo.get("element")
+			if element and self._invokeElement(element, actionName, announce=False):
+				return True
+			rect = targetInfo.get("rect")
+			if rect:
+				self._clickAtPosition(
+					int((rect[0] + rect[2]) / 2),
+					int((rect[1] + rect[3]) / 2),
+					hwnd=state["hwnd"],
+				)
+				return True
+
+		if _clickFallbackPoint():
+			return True
+
+		if actionName == "取消":
+			from keyboardHandler import KeyboardInputGesture
 			KeyboardInputGesture.fromName("escape").send()
-			ui.message(_("已取消"))
+			return True
+
+		if actionName == "收回":
+			ui.message(_("找不到收回按鈕"))
+			return False
+
+		if actionName == "無痕收回":
+			ui.message(_("找不到無痕收回按鈕，需要 Premium"))
+			return False
+
+		return False
+
+	def _scheduleRecallCompletionAnnouncement(self, actionName, token):
+		"""Verify the dialog closed before announcing the recall result."""
+		def _finish():
+			if getattr(self, "_recallConfirmationToken", 0) != token:
+				return
+			stillVisible = self._isRecallConfirmationDialogVisible()
+			self._clearRecallConfirmationBindings()
+			if stillVisible:
+				if actionName == "無痕收回":
+					ui.message(_("無痕收回可能未成功"))
+				elif actionName == "收回":
+					ui.message(_("收回可能未成功"))
+				else:
+					ui.message(_("取消可能未成功"))
+				return
+
+			if actionName == "無痕收回":
+				ui.message(_("已無痕收回"))
+			elif actionName == "收回":
+				ui.message(_("已收回"))
+			else:
+				ui.message(_("已取消"))
+
+		core.callLater(650, _finish)
+
+	def _endRecallConfirmation(self, actionName):
+		"""End the recall confirmation by activating the requested dialog action."""
+		if (
+			not getattr(self, '_recallPending', False)
+			or getattr(self, '_recallActionInProgress', False)
+		):
+			return
+		self._recallActionInProgress = True
+		if not self._performRecallConfirmationAction(actionName):
+			self._recallActionInProgress = False
+			return
+
+		token = getattr(self, "_recallConfirmationToken", 0)
+		self._scheduleRecallCompletionAnnouncement(actionName, token)
 
 	def script_confirmRecall(self, gesture):
-		"""User pressed Y to confirm message recall."""
-		self._endRecallConfirmation(True)
+		"""User pressed Y to choose the standard recall action."""
+		self._endRecallConfirmation("收回")
 
 	def script_cancelRecall(self, gesture):
 		"""User pressed N to cancel message recall."""
-		self._endRecallConfirmation(False)
+		self._endRecallConfirmation("取消")
+
+	def script_stealthRecall(self, gesture):
+		"""User pressed P to choose stealth recall (requires Premium)."""
+		self._endRecallConfirmation("無痕收回")
 
 	@script(
 		gesture="kb:applications",
