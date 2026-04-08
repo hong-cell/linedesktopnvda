@@ -5972,6 +5972,13 @@ class AppModule(appModuleHandler.AppModule):
 		savePath = os.path.join(tempfile.gettempdir(), "lineDesktop_chat_export.txt")
 		self._messageReaderSavePath = savePath
 
+		# Pre-delete existing file to suppress the overwrite confirmation dialog
+		try:
+			if os.path.isfile(savePath):
+				os.remove(savePath)
+		except Exception as e:
+			log.warning(f"LINE: could not pre-delete chat export: {e}")
+
 		# Find the filename edit control in the Save dialog
 		# The file dialog has a ComboBoxEx32 > ComboBox > Edit hierarchy
 		editHwnd = self._findSaveDialogEdit(dialogHwnd)
