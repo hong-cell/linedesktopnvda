@@ -5941,6 +5941,7 @@ class AppModule(appModuleHandler.AppModule):
 		"""Find the Save As dialog, set filename to temp folder, and save."""
 		import ctypes
 		import ctypes.wintypes as wintypes
+		import tempfile
 
 		lineProcessId = self.processID
 		WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
