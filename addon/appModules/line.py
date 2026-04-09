@@ -5966,6 +5966,7 @@ class AppModule(appModuleHandler.AppModule):
 			if retriesLeft > 0:
 				core.callLater(300, lambda: self._messageReaderHandleSaveDialog(retriesLeft - 1))
 			else:
+				self._messageReaderPending = False
 				ui.message(_("未偵測到儲存對話框"))
 			return
 
@@ -5985,6 +5986,7 @@ class AppModule(appModuleHandler.AppModule):
 		# The file dialog has a ComboBoxEx32 > ComboBox > Edit hierarchy
 		editHwnd = self._findSaveDialogEdit(dialogHwnd)
 		if not editHwnd:
+    self._messageReaderPending = False
 			ui.message(_("無法操作儲存對話框"))
 			return
 
@@ -6008,7 +6010,7 @@ class AppModule(appModuleHandler.AppModule):
 		import ctypes
 		import ctypes.wintypes as wintypes
 
-		WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+		WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 		foundEdit = [None]
 
 		# Primary: find Edit inside any ComboBoxEx32 > ComboBox (filename field)
