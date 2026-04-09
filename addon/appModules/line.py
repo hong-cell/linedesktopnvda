@@ -5886,7 +5886,6 @@ class AppModule(appModuleHandler.AppModule):
 		"""Handle post-click actions from the chat more-options virtual window."""
 		if actionName == "儲存聊天":
 			if getattr(self, '_messageReaderPending', False):
-				self._messageReaderPending = False
 				core.callLater(800, self._messageReaderHandleSaveDialog)
 			else:
 				self._suppressAddonForFileDialog("Save chat selected")
@@ -6137,6 +6136,7 @@ class AppModule(appModuleHandler.AppModule):
 		savePath = getattr(self, '_messageReaderSavePath', None)
 		if not savePath or not os.path.isfile(savePath):
 			ui.message(_("找不到儲存的聊天紀錄檔案"))
+			self._messageReaderPending = False
 			return
 
 		try:
@@ -6146,13 +6146,16 @@ class AppModule(appModuleHandler.AppModule):
 			messages = parseChatFile(savePath)
 			if not messages:
 				ui.message(_("聊天紀錄中沒有訊息"))
+				self._messageReaderPending = False
 				return
 
 			log.info(f"LINE: message reader parsed {len(messages)} messages from {savePath}")
 			openMessageReader(messages, cleanupPath=savePath)
+			self._messageReaderPending = False
 		except Exception as e:
 			log.warning(f"LINE: message reader parse error: {e}", exc_info=True)
 			ui.message(_("訊息閱讀器開啟錯誤"))
+			self._messageReaderPending = False
 
 	def script_openFileDialog(self, gesture):
 		"""Pass Ctrl+O to LINE, suppress addon while file dialog is open."""

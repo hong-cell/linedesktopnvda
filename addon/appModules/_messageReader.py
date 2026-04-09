@@ -109,6 +109,8 @@ class MessageReaderDialog(wx.Dialog):
 			self._speakMessage(_("已經是最後一則訊息"))
 
 	def _onClose(self, evt):
+		global _readerDlg
+		_readerDlg = None  # Allow future invocations to create a new instance
 		# Clean up temp file if specified
 		if self._cleanupPath:
 			try:
