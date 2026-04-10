@@ -108,3 +108,26 @@ def test_message_reader_formats_date_rows_without_removing_original_text():
 	assert dialog._formatMessage(
 		{"type": "message", "name": "Alice", "content": "早安", "time": "09:00"}
 	) == "Alice 早安 09:00"
+
+
+def test_message_reader_progress_counts_only_real_messages():
+	dialog = object.__new__(message_reader.MessageReaderDialog)
+	dialog._messages = [
+		{"type": "date", "content": "2026.04.09 星期四"},
+		{"type": "message", "name": "Alice", "content": "早安", "time": "09:00"},
+		{"type": "date", "content": "2026.04.10 星期五"},
+		{"type": "message", "name": "Bob", "content": "晚安", "time": "21:00"},
+	]
+	dialog._messageCount = 2
+
+	dialog._pos = 0
+	assert dialog._getProgressLabel() == "1 / 2"
+
+	dialog._pos = 1
+	assert dialog._getProgressLabel() == "1 / 2"
+
+	dialog._pos = 2
+	assert dialog._getProgressLabel() == "2 / 2"
+
+	dialog._pos = 3
+	assert dialog._getProgressLabel() == "2 / 2"

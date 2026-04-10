@@ -20,6 +20,7 @@ class MessageReaderDialog(wx.Dialog):
 			style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
 		)
 		self._messages = messages
+		self._messageCount = sum(1 for msg in messages if msg.get('type') != 'date')
 		self._pos = 0 if messages else -1
 		self._cleanupPath = cleanupPath
 
@@ -55,6 +56,18 @@ class MessageReaderDialog(wx.Dialog):
 			return msg.get('content', '')
 		return f"{msg['name']} {msg['content']} {msg['time']}"
 
+	def _getProgressLabel(self):
+		if self._messageCount <= 0 or self._pos < 0:
+			return ""
+		currentMessageIndex = sum(
+			1 for msg in self._messages[: self._pos + 1] if msg.get('type') != 'date'
+		)
+		if self._messages[self._pos].get('type') == 'date' and currentMessageIndex < self._messageCount:
+			currentMessageIndex += 1
+		if currentMessageIndex <= 0:
+			return ""
+		return f"{currentMessageIndex} / {self._messageCount}"
+
 	def _updateDisplay(self):
 		if not self._messages or self._pos < 0:
 			self._textCtrl.SetValue(_("沒有訊息"))
@@ -63,9 +76,7 @@ class MessageReaderDialog(wx.Dialog):
 		msg = self._messages[self._pos]
 		text = self._formatMessage(msg)
 		self._textCtrl.SetValue(text)
-		self._totalLabel.SetLabel(
-			f"{self._pos + 1} / {len(self._messages)}"
-		)
+		self._totalLabel.SetLabel(self._getProgressLabel())
 		self._speakMessage(text)
 
 	def _speakMessage(self, text):
