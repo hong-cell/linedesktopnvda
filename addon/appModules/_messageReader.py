@@ -6,7 +6,8 @@ from logHandler import log
 class MessageReaderDialog(wx.Dialog):
 	"""A dialog for reading LINE chat messages with up/down arrow navigation.
 
-	Each message is displayed as: name content time
+	Messages are displayed as: name content time
+	Date separators are displayed in their original positions.
 	Up arrow moves to the previous message, down arrow moves to the next.
 	"""
 
@@ -21,6 +22,13 @@ class MessageReaderDialog(wx.Dialog):
 		self._messages = messages
 		self._pos = 0 if messages else -1
 		self._cleanupPath = cleanupPath
+		self._messageCount = sum(1 for msg in messages if msg.get('type') != 'date')
+		self._messageIndexMap = []
+		messageIndex = 0
+		for msg in messages:
+			if msg.get('type') != 'date':
+				messageIndex += 1
+			self._messageIndexMap.append(messageIndex)
 
 		panel = wx.Panel(self)
 		sizer = wx.BoxSizer(wx.VERTICAL)
@@ -50,7 +58,21 @@ class MessageReaderDialog(wx.Dialog):
 		self._textCtrl.SetFocus()
 
 	def _formatMessage(self, msg):
+		if msg.get('type') == 'date':
+			return msg.get('content', '')
 		return f"{msg['name']} {msg['content']} {msg['time']}"
+
+	def _getProgressLabel(self):
+		"""Return progress text counting only actual messages."""
+		if self._messageCount <= 0 or self._pos < 0:
+			return ""
+		currentMessageIndex = self._messageIndexMap[self._pos]
+		if self._messages[self._pos].get('type') == 'date':
+			if currentMessageIndex < self._messageCount:
+				currentMessageIndex += 1
+			else:
+				return ""
+		return f"{currentMessageIndex} / {self._messageCount}"
 
 	def _updateDisplay(self):
 		if not self._messages or self._pos < 0:
@@ -60,9 +82,7 @@ class MessageReaderDialog(wx.Dialog):
 		msg = self._messages[self._pos]
 		text = self._formatMessage(msg)
 		self._textCtrl.SetValue(text)
-		self._totalLabel.SetLabel(
-			f"{self._pos + 1} / {len(self._messages)}"
-		)
+		self._totalLabel.SetLabel(self._getProgressLabel())
 		self._speakMessage(text)
 
 	def _speakMessage(self, text):
@@ -96,7 +116,7 @@ class MessageReaderDialog(wx.Dialog):
 			self._pos -= 1
 			self._updateDisplay()
 		else:
-			self._speakMessage(_("已經是第一則訊息"))
+			self._speakMessage(_("已經是第一項"))
 
 	def _moveNext(self):
 		if not self._messages:
@@ -105,7 +125,7 @@ class MessageReaderDialog(wx.Dialog):
 			self._pos += 1
 			self._updateDisplay()
 		else:
-			self._speakMessage(_("已經是最後一則訊息"))
+			self._speakMessage(_("已經是最後一項"))
 
 	def _onClose(self, evt):
 		global _readerDlg
