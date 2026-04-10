@@ -21,6 +21,12 @@ class MessageReaderDialog(wx.Dialog):
 		)
 		self._messages = messages
 		self._messageCount = sum(1 for msg in messages if msg.get('type') != 'date')
+		self._messageIndexMap = {}
+		realCount = 0
+		for i, msg in enumerate(messages):
+			if msg.get('type') != 'date':
+				realCount += 1
+			self._messageIndexMap[i] = realCount
 		self._pos = 0 if messages else -1
 		self._cleanupPath = cleanupPath
 
@@ -59,9 +65,7 @@ class MessageReaderDialog(wx.Dialog):
 	def _getProgressLabel(self):
 		if self._messageCount <= 0 or self._pos < 0:
 			return ""
-		currentMessageIndex = sum(
-			1 for msg in self._messages[: self._pos + 1] if msg.get('type') != 'date'
-		)
+		currentMessageIndex = self._messageIndexMap[self._pos]
 		if self._messages[self._pos].get('type') == 'date' and currentMessageIndex < self._messageCount:
 			currentMessageIndex += 1
 		return f"{currentMessageIndex} / {self._messageCount}"

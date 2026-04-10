@@ -120,6 +120,12 @@ def test_message_reader_progress_counts_only_real_messages():
 		{"type": "message", "name": "Bob", "content": "晚安", "time": "21:00"},
 	]
 	dialog._messageCount = 2
+	dialog._messageIndexMap = {
+		0: 0,
+		1: 1,
+		2: 1,
+		3: 2,
+	}
 
 	dialog._pos = 0
 	assert dialog._getProgressLabel() == "1 / 2"
