@@ -6,7 +6,8 @@ from logHandler import log
 class MessageReaderDialog(wx.Dialog):
 	"""A dialog for reading LINE chat messages with up/down arrow navigation.
 
-	Each message is displayed as: name content time
+	Messages are displayed as: name content time
+	Date separators are displayed in their original positions.
 	Up arrow moves to the previous message, down arrow moves to the next.
 	"""
 
@@ -50,6 +51,8 @@ class MessageReaderDialog(wx.Dialog):
 		self._textCtrl.SetFocus()
 
 	def _formatMessage(self, msg):
+		if msg.get('type') == 'date':
+			return msg.get('content', '')
 		return f"{msg['name']} {msg['content']} {msg['time']}"
 
 	def _updateDisplay(self):
