@@ -330,6 +330,7 @@ def test_looks_like_line_date_separator_text_matches_line_style_dates():
 		assignment_names={"_LINE_DATE_SEPARATOR_RE"},
 		function_names={
 			"_normalizeLineDateSeparatorOcrText",
+			"_getSpokenLineDateSeparatorText",
 			"_looksLikeLineDateSeparatorText",
 		},
 		namespace={
@@ -340,11 +341,15 @@ def test_looks_like_line_date_separator_text_matches_line_style_dates():
 
 	assert ns["_looksLikeLineDateSeparatorText"]("今天") is True
 	assert ns["_looksLikeLineDateSeparatorText"]("昨天") is True
+	assert ns["_looksLikeLineDateSeparatorText"]("阼天") is True
 	assert ns["_looksLikeLineDateSeparatorText"]("4 月 8 日 ( 三 )") is True
 	assert ns["_looksLikeLineDateSeparatorText"]("2026 年 4 月 8 日 ( 三 )") is True
 	assert ns["_looksLikeLineDateSeparatorText"]("今天下午 5 : 28") is False
 	assert ns["_looksLikeLineDateSeparatorText"]("下午 5 : 28") is False
 	assert ns["_looksLikeLineDateSeparatorText"]("4 月 8 日 ( 三 ) 下午 5 : 28") is False
+	assert ns["_getSpokenLineDateSeparatorText"]("阼天") == "昨天"
+	assert ns["_getSpokenLineDateSeparatorText"]("昨天") == "昨天"
+	assert ns["_getSpokenLineDateSeparatorText"]("4 月 8 日 ( 三 )") == "4 月 8 日 ( 三 )"
 
 
 def test_is_centered_line_date_separator_ocr_requires_compact_centered_geometry():
@@ -364,6 +369,11 @@ def test_is_centered_line_date_separator_ocr_requires_compact_centered_geometry(
 	assert ns["_isCenteredLineDateSeparatorOcr"](
 		"今天",
 		[{"text": "今天", "rect": (803, 164, 847, 186)}],
+		(547, 142, 1102, 211),
+	) is True
+	assert ns["_isCenteredLineDateSeparatorOcr"](
+		"阼天",
+		[{"text": "阼天", "rect": (803, 164, 847, 186)}],
 		(547, 142, 1102, 211),
 	) is True
 	assert ns["_isCenteredLineDateSeparatorOcr"](
@@ -481,6 +491,95 @@ def test_get_recall_confirmation_prompt_marks_stealth_option_as_premium():
 		)
 		== "確認要收回嗎？按 Y 收回，按 N 取消，按 P 無痕收回，需要 Premium"
 	)
+
+
+def test_extract_photo_text_consent_action_labels_ignores_title_and_body_mentions_of_agree():
+	ns = _load_line_symbols(
+		function_names={
+			"_normalizePhotoTextConsentDialogLine",
+			"_matchPhotoTextConsentActionLabel",
+			"_extractPhotoTextConsentActionLabels",
+		},
+		namespace={
+			"_removeCJKSpaces": lambda text: text.replace(" ", ""),
+		},
+	)
+
+	labels = ns["_extractPhotoTextConsentActionLabels"](
+		"同意提供照片\n"
+		"使用本功能會將照片傳至本公司伺服器進行處理\n"
+		"您要同意本功能的服務規定並開始使用嗎？\n"
+		"同意\n"
+		"不同意"
+	)
+
+	assert labels == ["同意", "不同意"]
+
+
+def test_is_photo_text_consent_dialog_text_requires_upload_notice_and_buttons():
+	ns = _load_line_symbols(
+		function_names={"_isPhotoTextConsentDialogText"},
+		namespace={"_removeCJKSpaces": lambda text: text.replace(" ", "")},
+	)
+
+	assert ns["_isPhotoTextConsentDialogText"](
+		"同意提供照片\n"
+		"使用本功能會將照片傳至本公司伺服器進行處理\n"
+		"您要同意本功能的服務規定並開始使用嗎？\n"
+		"同意\n"
+		"不同意",
+		["同意", "不同意"],
+	) is True
+	assert ns["_isPhotoTextConsentDialogText"](
+		"同意提供照片\n同意\n不同意",
+		["同意", "不同意"],
+	) is False
+
+
+def test_get_photo_text_consent_prompt_mentions_upload_notice_and_a_d_shortcuts():
+	ns = _load_line_symbols(
+		function_names={"_getPhotoTextConsentPrompt"},
+		namespace={"_": lambda text: text},
+	)
+
+	assert (
+		ns["_getPhotoTextConsentPrompt"]()
+		== "轉為文字會將照片上傳到 LINE 伺服器處理。按 A 同意，按 D 不同意"
+	)
+
+
+def test_extract_photo_text_consent_action_click_points_use_button_rows_not_dialog_title():
+	ns = _load_line_symbols(
+		function_names={
+			"_normalizePhotoTextConsentDialogLine",
+			"_matchPhotoTextConsentActionLabel",
+			"_rectsIntersect",
+			"_extractPhotoTextConsentActionClickPoints",
+		},
+		namespace={
+			"_removeCJKSpaces": lambda text: text.replace(" ", ""),
+		},
+	)
+
+	points = ns["_extractPhotoTextConsentActionClickPoints"](
+		[
+			{"text": "同意提供照片", "rect": (360, 240, 560, 292)},
+			{"text": "同意", "rect": (432, 600, 516, 636)},
+			{"text": "不同意", "rect": (544, 600, 652, 636)},
+		],
+		(320, 220, 760, 760),
+	)
+
+	assert points == {
+		"同意": {
+			"clickPoint": (474, 618),
+			"rect": (432, 600, 516, 636),
+		},
+		"不同意": {
+			"clickPoint": (598, 618),
+			"rect": (544, 600, 652, 636),
+		},
+	}
 
 
 def test_is_modern_recall_dialog_text_accepts_compact_two_button_modern_layout():
@@ -884,6 +983,41 @@ def test_begin_recall_confirmation_binds_y_n_p_shortcuts():
 	assert ("kb:p", "stealthRecall") in bind_calls
 
 
+def test_begin_photo_text_consent_binds_a_d_shortcuts():
+	module_path = Path(__file__).resolve().parents[1] / "addon" / "appModules" / "line.py"
+	source = module_path.read_text(encoding="utf-8")
+	module = ast.parse(source)
+	app_module = next(
+		node
+		for node in module.body
+		if isinstance(node, ast.ClassDef) and node.name == "AppModule"
+	)
+	begin_method = next(
+		node
+		for node in app_module.body
+		if isinstance(node, ast.FunctionDef) and node.name == "_beginPhotoTextConsent"
+	)
+
+	bind_calls = set()
+	for node in ast.walk(begin_method):
+		if not (
+			isinstance(node, ast.Call)
+			and isinstance(node.func, ast.Attribute)
+			and node.func.attr == "bindGesture"
+			and len(node.args) >= 2
+		):
+			continue
+		first_arg, second_arg = node.args[:2]
+		if all(
+			isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+			for arg in (first_arg, second_arg)
+		):
+			bind_calls.add((first_arg.value, second_arg.value))
+
+	assert ("kb:a", "acceptPhotoTextConsent") in bind_calls
+	assert ("kb:d", "declinePhotoTextConsent") in bind_calls
+
+
 def test_end_recall_confirmation_defers_user_feedback_until_post_click_verification():
 	module_path = Path(__file__).resolve().parents[1] / "addon" / "appModules" / "line.py"
 	source = module_path.read_text(encoding="utf-8")
@@ -1102,6 +1236,101 @@ def test_perform_recall_confirmation_action_prefers_compact_modern_fallback_befo
 	assert clicks == [((222, 333), {"hwnd": 789})]
 
 
+def test_handle_message_context_menu_action_starts_photo_consent_watch_for_convert_to_text():
+	module_path = Path(__file__).resolve().parents[1] / "addon" / "appModules" / "line.py"
+	source = module_path.read_text(encoding="utf-8")
+	module = ast.parse(source)
+	app_module = next(
+		node
+		for node in module.body
+		if isinstance(node, ast.ClassDef) and node.name == "AppModule"
+	)
+	method = next(
+		node
+		for node in app_module.body
+		if isinstance(node, ast.FunctionDef) and node.name == "_handleMessageContextMenuAction"
+	)
+	ns = {}
+	exec(
+		compile(
+			ast.Module(body=[method], type_ignores=[]),
+			str(module_path),
+			"exec",
+		),
+		ns,
+	)
+	handle = ns["_handleMessageContextMenuAction"]
+	calls = []
+
+	class _Self:
+		def _watchForRecallConfirmationDialog(self):
+			calls.append("recall")
+
+		def _watchForPhotoTextConsentDialog(self):
+			calls.append("photo")
+
+	handle(_Self(), "轉為文字")
+	assert calls == ["photo"]
+	calls.clear()
+
+	handle(_Self(), "收回")
+	assert calls == ["recall"]
+
+
+def test_perform_photo_text_consent_action_prefers_ocr_click_point():
+	module_path = Path(__file__).resolve().parents[1] / "addon" / "appModules" / "line.py"
+	source = module_path.read_text(encoding="utf-8")
+	module = ast.parse(source)
+	app_module = next(
+		node
+		for node in module.body
+		if isinstance(node, ast.ClassDef) and node.name == "AppModule"
+	)
+	method = next(
+		node
+		for node in app_module.body
+		if isinstance(node, ast.FunctionDef) and node.name == "_performPhotoTextConsentAction"
+	)
+	ns = {
+		"log": _Log(),
+		"_getPhotoTextConsentDialogFallbackClickPoint": lambda *args, **kwargs: None,
+		"_": lambda text: text,
+	}
+	exec(
+		compile(
+			ast.Module(body=[method], type_ignores=[]),
+			str(module_path),
+			"exec",
+		),
+		ns,
+	)
+	perform = ns["_performPhotoTextConsentAction"]
+	clicks = []
+
+	class _Self:
+		def _refreshPhotoTextConsentState(self):
+			return {
+				"targets": {
+					"同意": {
+						"element": object(),
+						"rect": (100, 200, 300, 320),
+						"clickPoint": (184, 266),
+					},
+				},
+				"hwnd": 321,
+				"dialogRect": (50, 50, 350, 350),
+			}
+
+		def _invokeElement(self, *args, **kwargs):
+			raise AssertionError("photo consent should click the OCR hit before invoking UIA")
+
+		def _clickAtPosition(self, *args, **kwargs):
+			clicks.append((args, kwargs))
+
+	assert perform(_Self(), "同意") is True
+	assert clicks == [((184, 266), {"hwnd": 321})]
+
+
 def test_activate_message_context_menu_supports_keyboard_fallback_hooks():
 	module_path = Path(__file__).resolve().parents[1] / "addon" / "appModules" / "line.py"
 	source = module_path.read_text(encoding="utf-8")
@@ -1244,6 +1473,24 @@ def test_copy_read_and_context_menu_actions_use_popup_label_click_point_resoluti
 			and node.func.id == "_collectPopupMenuRowRects"
 			for node in ast.walk(function_node)
 		), "popup OCR flows should collect row rects before clicking popup menu items"
+
+
+def test_copy_read_uses_spoken_date_separator_text_helper():
+	module_path = Path(__file__).resolve().parents[1] / "addon" / "appModules" / "line.py"
+	source = module_path.read_text(encoding="utf-8")
+	module = ast.parse(source)
+	copy_read = next(
+		node
+		for node in module.body
+		if isinstance(node, ast.FunctionDef) and node.name == "_copyAndReadMessage"
+	)
+
+	assert any(
+		isinstance(node, ast.Call)
+		and isinstance(node.func, ast.Name)
+		and node.func.id == "_getSpokenLineDateSeparatorText"
+		for node in ast.walk(copy_read)
+	), "copy-read should normalize the spoken text for detected date separator OCR"
 
 
 def test_popup_validation_and_native_gesture_helpers_exist_for_message_context_menu():

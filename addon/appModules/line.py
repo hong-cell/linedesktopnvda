@@ -368,7 +368,16 @@ def _getCallAnnouncementFromOcr(text):
 		return None
 
 	normalized = _removeCJKSpaces(str(text).strip())
-	if "取消" in normalized:
+	if re.search(r"取消(?:的)?通話", normalized):
+		return "取消的通話"
+	if (
+		"取消" in normalized
+		and re.search(
+			r"(?:(?:[上下]午)|午|am|pm)?\s*\d{1,2}\s*:\s*\d{2}",
+			normalized,
+			re.IGNORECASE,
+		)
+	):
 		return "取消的通話"
 	if "無應答" in normalized:
 		return "無應答"
@@ -378,6 +387,54 @@ def _getCallAnnouncementFromOcr(text):
 	duration = _extractCallDuration(normalized)
 	if duration:
 		return f"通話時間：{duration}"
+	return None
+
+
+_IMAGE_ATTACHMENT_MENU_KEYWORDS = (
+	"轉為文字",
+	"掃描行動條碼",
+	"新增至相簿",
+	"設為聊天室背景",
+)
+
+
+def _looksLikeImageAttachmentMenu(text):
+	"""Return True when menu text matches LINE image/photo attachment actions."""
+	if not text:
+		return False
+
+	normalized = _removeCJKSpaces(str(text).strip())
+	if "另存新檔" not in normalized:
+		return False
+
+	return any(
+		keyword in normalized
+		for keyword in _IMAGE_ATTACHMENT_MENU_KEYWORDS
+	)
+
+
+def _extractDownloadDeadlineAnnouncement(text):
+	"""Extract a spoken download-deadline hint from OCR text."""
+	if not text:
+		return None
+
+	lines = [
+		_removeCJKSpaces(str(rawLine).strip())
+		for rawLine in str(text).splitlines()
+		if rawLine and str(rawLine).strip()
+	]
+	actionKeywords = ("儲存", "另存新檔", "分享", "Keep")
+	for index, line in enumerate(lines):
+		if "下載期限" not in line:
+			continue
+		suffix = line.split("下載期限", 1)[1].lstrip("：: ").strip(" |")
+		if suffix:
+			return f"下載期限：{suffix}"
+		if index + 1 < len(lines):
+			nextLine = lines[index + 1].lstrip("：: ").strip(" |")
+			if nextLine and not any(keyword in nextLine for keyword in actionKeywords):
+				return f"下載期限：{nextLine}"
+		return "下載期限未明"
 	return None
 
 
@@ -457,6 +514,139 @@ def _getRecallConfirmationPrompt(availableActions, isModernDialog=False):
 	if "無痕收回" in actionSet:
 		return _("確認要收回嗎？按 Y 收回，按 N 取消，按 P 無痕收回，需要 Premium")
 	return _("確認要收回嗎？按 Y 收回，按 N 取消")
+
+
+def _normalizePhotoTextConsentDialogLine(text):
+	"""Normalize a photo-to-text consent OCR/UIA line for action matching."""
+	normalized = _removeCJKSpaces((text or "").strip()).replace(" ", "").lower()
+	return normalized.strip(".,:;!?|/\\()[]{}<>。！？、．：；")
+
+
+def _matchPhotoTextConsentActionLabel(text):
+	"""Map a short photo-to-text consent action label to its canonical action name."""
+	normalized = _normalizePhotoTextConsentDialogLine(text)
+	if not normalized:
+		return None
+
+	if normalized == "同意":
+		return "同意"
+	if normalized == "不同意":
+		return "不同意"
+	return None
+
+
+def _extractPhotoTextConsentActionLabels(text):
+	"""Extract actionable photo-to-text consent buttons from OCR text."""
+	labels = []
+	for rawLine in str(text or "").splitlines():
+		label = _matchPhotoTextConsentActionLabel(rawLine)
+		if label and (not labels or labels[-1] != label):
+			labels.append(label)
+	return labels
+
+
+def _isPhotoTextConsentDialogText(text, actionLabels=()):
+	"""Return True when OCR/UIA text matches LINE's first-run photo consent dialog."""
+	normalized = _removeCJKSpaces(str(text or "").strip()).replace(" ", "").lower()
+	actionSet = set(actionLabels or ())
+	hasButtons = {"同意", "不同意"}.issubset(actionSet)
+	if not hasButtons:
+		return False
+
+	hasTitle = any(keyword in normalized for keyword in ("同意提供照片", "提供照片"))
+	hasUploadNotice = any(keyword in normalized for keyword in ("照片", "相片")) and any(
+		keyword in normalized
+		for keyword in ("伺服器", "服务器", "上傳", "上传", "進行處理", "进行处理")
+	)
+	hasServiceNotice = any(
+		keyword in normalized
+		for keyword in ("服務規定", "服务规定", "開始使用", "开始使用")
+	)
+	return sum(bool(flag) for flag in (hasTitle, hasUploadNotice, hasServiceNotice)) >= 2
+
+
+def _getPhotoTextConsentPrompt():
+	"""Return the spoken prompt for LINE's first-run photo consent dialog."""
+	return _("轉為文字會將照片上傳到 LINE 伺服器處理。按 A 同意，按 D 不同意")
+
+
+def _extractPhotoTextConsentActionClickPoints(ocrLines, dialogRect):
+	"""Map photo-to-text consent actions to OCR-derived click points."""
+	if not ocrLines or not dialogRect:
+		return {}
+
+	dialogLeft, dialogTop, dialogRight, dialogBottom = dialogRect
+	dialogWidth = dialogRight - dialogLeft
+	dialogHeight = dialogBottom - dialogTop
+	if dialogWidth <= 0 or dialogHeight <= 0:
+		return {}
+
+	buttonBandTop = dialogTop + (dialogHeight * 0.55)
+	preferredCenterX = {
+		"同意": dialogLeft + (dialogWidth * 0.38),
+		"不同意": dialogLeft + (dialogWidth * 0.62),
+	}
+	matched = {}
+
+	for index, line in enumerate(ocrLines):
+		label = _matchPhotoTextConsentActionLabel(line.get("text", ""))
+		rect = line.get("rect")
+		if not label or not rect or not _rectsIntersect(rect, dialogRect):
+			continue
+
+		rectLeft, rectTop, rectRight, rectBottom = rect
+		if rectRight <= rectLeft or rectBottom <= rectTop:
+			continue
+
+		centerX = (rectLeft + rectRight) / 2.0
+		centerY = (rectTop + rectBottom) / 2.0
+		score = (
+			1 if centerY >= buttonBandTop else 0,
+			centerY,
+			-abs(centerX - preferredCenterX[label]),
+			(rectRight - rectLeft) * (rectBottom - rectTop),
+			-index,
+		)
+		current = matched.get(label)
+		if current is None or score > current["score"]:
+			matched[label] = {
+				"clickPoint": (int(centerX), int(centerY)),
+				"rect": rect,
+				"score": score,
+			}
+
+	return {
+		label: {
+			"clickPoint": data["clickPoint"],
+			"rect": data["rect"],
+		}
+		for label, data in matched.items()
+	}
+
+
+def _getPhotoTextConsentDialogFallbackClickPoint(actionName, dialogRect):
+	"""Return a best-effort click point for the photo consent dialog buttons."""
+	if not dialogRect:
+		return None
+
+	ratios = {
+		"同意": (0.38, 0.79),
+		"不同意": (0.62, 0.79),
+	}
+	if actionName not in ratios:
+		return None
+
+	left, top, right, bottom = dialogRect
+	width = right - left
+	height = bottom - top
+	if width <= 0 or height <= 0:
+		return None
+
+	xRatio, yRatio = ratios[actionName]
+	return (
+		int(left + width * xRatio),
+		int(top + height * yRatio),
+	)
 
 
 def _extractOcrRectLike(obj):
@@ -1258,6 +1448,9 @@ def _normalizeLineDateSeparatorOcrText(text):
 		.replace("．", ".")
 	)
 	normalized = re.sub(r"\s+", "", normalized)
+	# OCR can misread the standalone date chip "昨天" as visually similar text.
+	if normalized == "阼天":
+		return "昨天"
 	return normalized
 
 
@@ -1267,6 +1460,18 @@ def _looksLikeLineDateSeparatorText(text):
 	if not normalized:
 		return False
 	return bool(_LINE_DATE_SEPARATOR_RE.fullmatch(normalized))
+
+
+def _getSpokenLineDateSeparatorText(text):
+	"""Return the user-facing text for a recognized LINE date separator chip."""
+	rawText = (text or "").strip()
+	if not rawText:
+		return ""
+
+	normalized = _normalizeLineDateSeparatorOcrText(rawText)
+	if normalized in {"今天", "昨天"}:
+		return normalized
+	return rawText
 
 
 def _isCenteredLineDateSeparatorOcr(text, ocrLines, rect):
@@ -3235,6 +3440,7 @@ def _copyAndReadMessage(targetElement):
 		"text": "",
 		"lines": [],
 		"isDateSeparator": False,
+		"callAnnouncement": None,
 	}
 
 	def _isCurrentRequest():
@@ -3368,12 +3574,16 @@ def _copyAndReadMessage(targetElement):
 				ocrLines,
 				(elLeft, elTop, elRight, elBottom),
 			)
+			messageOcrCache["callAnnouncement"] = _getCallAnnouncementFromOcr(
+				msgText,
+			)
 			if messageOcrCache["isDateSeparator"]:
+				spokenDateText = _getSpokenLineDateSeparatorText(msgText)
 				log.info(
 					f"LINE: copy-read detected centered date separator via OCR: "
-					f"{msgText!r}"
+					f"{msgText!r} -> {spokenDateText!r}"
 				)
-				return msgText
+				return spokenDateText
 			ocrClickPositions = _buildMessageBubbleOcrClickPositions(
 				ocrLines,
 				(elLeft, elTop, elRight, elBottom),
@@ -3485,7 +3695,7 @@ def _copyAndReadMessage(targetElement):
 			if popupCandidates:
 				popupHwnd = popupCandidates[0]
 			else:
-				clickX, clickY, _ = clickState["positions"][posIdx]
+				clickX, clickY, _positionLabel = clickState["positions"][posIdx]
 				for dy in [0, -40, -80, 40, 80]:
 					pt = wintypes.POINT(clickX, clickY + dy)
 					candHwnd = ctypes.windll.user32.WindowFromPoint(pt)
@@ -3726,6 +3936,17 @@ def _copyAndReadMessage(targetElement):
 			# Detect file / voice messages when Copy is unavailable
 			if not copyItem and not copyClickPoint and menuItems and len(menuItems) >= 3:
 				popupOcrLooksLikeMenu = bool(popupOcrMatchedLabels)
+				menuTextBlob = "\n".join(
+					text
+					for _item, text in menuItems
+					if text
+				)
+				if popupOcrLooksLikeMenu and popupOcrText:
+					menuTextBlob = "\n".join(
+						part
+						for part in (menuTextBlob, popupOcrText)
+						if part
+					)
 
 				def _menuHasText(keyword):
 					for _item, text in menuItems:
@@ -3738,33 +3959,61 @@ def _copyAndReadMessage(targetElement):
 				menuHasSaveAs = _menuHasText("另存新檔")
 				menuHasSave = _menuHasText("儲存")
 				if menuHasSaveAs and menuHasSave:
+					if _looksLikeImageAttachmentMenu(menuTextBlob):
+						log.info("LINE: copy-read detected image message")
+						ui.message(_("圖片，請按 NVDA+Windows+K 下載。"))
+						_dismissMenu()
+						_restoreClipboard(origClip)
+						return
 					msgOcrText = _getMessageOcrText()
 					if msgOcrText:
 						msgHasSaveAs = "另存新檔" in msgOcrText
 						msgHasSave = "儲存" in msgOcrText
 						if msgHasSaveAs and msgHasSave:
-							if "下載期限" in msgOcrText:
+							downloadDeadline = _extractDownloadDeadlineAnnouncement(
+								msgOcrText
+							)
+							if downloadDeadline:
 								log.info("LINE: copy-read detected file message")
-								ui.message(_("檔案訊息。按 NVDA+Windows+K 另存新檔。"))
-								_dismissMenu()
-								_restoreClipboard(origClip)
-								return
-							if (
-								"播放" in msgOcrText
-								and re.search(r"\d{1,2}:\d{2}", msgOcrText)
-							):
-								log.info("LINE: copy-read detected voice message")
 								ui.message(
-									"語音訊息。按 NVDA+Windows+P 播放，"
-									"按 NVDA+Windows+K 另存新檔。"
+									_("檔案，{deadline}。請按 NVDA+Windows+K 下載。").format(
+										deadline=downloadDeadline,
+									)
 								)
 								_dismissMenu()
 								_restoreClipboard(origClip)
 								return
+							voiceDuration = _extractCallDuration(msgOcrText)
+							if voiceDuration:
+								log.info("LINE: copy-read detected voice message")
+								ui.message(
+									"語音訊息，請按 NVDA+Windows+P 播放，"
+									"按 NVDA+Windows+K 下載。"
+								)
+								_dismissMenu()
+								_restoreClipboard(origClip)
+								return
+							log.info("LINE: copy-read detected image message from OCR")
+							ui.message(_("圖片，請按 NVDA+Windows+K 下載。"))
+							_dismissMenu()
+							_restoreClipboard(origClip)
+							return
 
 			# If still no match, check if we got the wrong menu
 			if not copyItem and not copyClickPoint:
 				isSelectAll = len(menuItems) <= 2
+				if isSelectAll and messageOcrCache["callAnnouncement"]:
+					log.info(
+						f"LINE: copy-read detected call record early: "
+						f"{messageOcrCache['callAnnouncement']!r} "
+						f"after small menu at "
+						f"[{clickState['positions'][posIdx][2]}]"
+					)
+					_dismissMenu()
+					_restoreClipboard(origClip)
+					speech.cancelSpeech()
+					ui.message(messageOcrCache["callAnnouncement"])
+					return
 				if isSelectAll:
 					selectAllCount[0] += 1
 				if (
@@ -3780,9 +4029,11 @@ def _copyAndReadMessage(targetElement):
 					# record or otherwise non-copyable message.
 					_dismissMenu()
 					msgOcrText = _getMessageOcrText()
-					callAnnouncement = _getCallAnnouncementFromOcr(
-						msgOcrText
+					callAnnouncement = (
+						messageOcrCache["callAnnouncement"]
+						or _getCallAnnouncementFromOcr(msgOcrText)
 					)
+					messageOcrCache["callAnnouncement"] = callAnnouncement
 					if callAnnouncement:
 						log.info(
 							f"LINE: copy-read detected call "
@@ -8414,6 +8665,10 @@ class AppModule(appModuleHandler.AppModule):
 
 	def _getRecallConfirmationDialogRect(self, hwnd):
 		"""Return the centered screen rect that contains the LINE recall dialog."""
+		return self._getCenteredLineDialogRect(hwnd)
+
+	def _getCenteredLineDialogRect(self, hwnd):
+		"""Return a centered screen rect that covers LINE's modal dialogs."""
 		try:
 			winRect = ctypes.wintypes.RECT()
 			ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(winRect))
@@ -8436,8 +8691,12 @@ class AppModule(appModuleHandler.AppModule):
 				dialogTop + dialogH,
 			)
 		except Exception as e:
-			log.debug(f"LINE: failed to calculate recall dialog rect: {e}", exc_info=True)
+			log.debug(f"LINE: failed to calculate centered dialog rect: {e}", exc_info=True)
 			return None
+
+	def _getPhotoTextConsentDialogRect(self, hwnd):
+		"""Return the centered screen rect that contains the photo consent dialog."""
+		return self._getCenteredLineDialogRect(hwnd)
 
 	def _captureRecallConfirmationState(self):
 		"""Capture OCR and UIA state for the currently visible recall dialog."""
@@ -8812,6 +9071,8 @@ class AppModule(appModuleHandler.AppModule):
 		"""React to actions chosen from the message context virtual window."""
 		if actionName == "收回":
 			self._watchForRecallConfirmationDialog()
+		elif actionName == "轉為文字":
+			self._watchForPhotoTextConsentDialog()
 
 	def _clearRecallConfirmationBindings(self):
 		"""Clear the transient recall-confirmation bindings and cached dialog state."""
@@ -8958,6 +9219,425 @@ class AppModule(appModuleHandler.AppModule):
 	def script_stealthRecall(self, gesture):
 		"""User pressed P to choose stealth recall (requires Premium)."""
 		self._endRecallConfirmation("無痕收回")
+
+	def _capturePhotoTextConsentState(self):
+		"""Capture OCR and UIA state for the first-run photo-to-text consent dialog."""
+		state = {
+			"hwnd": None,
+			"dialogRect": None,
+			"ocrText": "",
+			"actionLabels": [],
+			"targets": {},
+		}
+		try:
+			hwnd = ctypes.windll.user32.GetForegroundWindow()
+			if not hwnd:
+				return state
+
+			dialogRect = self._getPhotoTextConsentDialogRect(hwnd)
+			if not dialogRect:
+				return state
+
+			left, top, right, bottom = dialogRect
+			ocrResult = self._ocrWindowAreaResult(
+				hwnd,
+				region=(left, top, right - left, bottom - top),
+				sync=True,
+				timeout=2.0,
+			)
+			ocrText = ""
+			ocrLines = []
+			if ocrResult is not None and not isinstance(ocrResult, Exception):
+				ocrText = _removeCJKSpaces(
+					(getattr(ocrResult, "text", "") or "").strip()
+				)
+				ocrLines = _extractOcrLines(ocrResult)
+			actionLabels = _extractPhotoTextConsentActionLabels(ocrText)
+			ocrActionTargets = _extractPhotoTextConsentActionClickPoints(
+				ocrLines,
+				dialogRect,
+			)
+
+			targetMatches = {}
+			handler = UIAHandler.handler
+			client = getattr(handler, "clientObject", None)
+			if client:
+				rootEl = client.ElementFromHandle(hwnd)
+				if rootEl:
+					allElements = self._collectAllElements(rootEl, handler)
+					dialogWidth = right - left
+					dialogHeight = bottom - top
+					expectedCenterY = top + (dialogHeight * 0.79)
+					preferredCenterX = {
+						"同意": left + (dialogWidth * 0.38),
+						"不同意": left + (dialogWidth * 0.62),
+					}
+					filteredElements = []
+
+					def _considerTarget(label, element, rectTuple):
+						rectWidth = rectTuple[2] - rectTuple[0]
+						rectHeight = rectTuple[3] - rectTuple[1]
+						if rectWidth <= 0 or rectHeight <= 0:
+							return
+
+						hasInvoke = 0
+						try:
+							hasInvoke = 1 if element.GetCurrentPattern(10000) else 0
+						except Exception:
+							pass
+
+						centerX = (rectTuple[0] + rectTuple[2]) / 2.0
+						centerY = (rectTuple[1] + rectTuple[3]) / 2.0
+						score = (
+							hasInvoke,
+							1 if centerY >= (top + (dialogHeight * 0.55)) else 0,
+							-abs(centerX - preferredCenterX[label]),
+							-abs(centerY - expectedCenterY),
+							rectWidth * rectHeight,
+						)
+						current = targetMatches.get(label)
+						if current is None or score > current["score"]:
+							targetMatches[label] = {
+								"score": score,
+								"element": element,
+								"rect": rectTuple,
+							}
+
+					for element in allElements:
+						try:
+							rect = element.CurrentBoundingRectangle
+							rectTuple = (
+								int(rect.left),
+								int(rect.top),
+								int(rect.right),
+								int(rect.bottom),
+							)
+						except Exception:
+							continue
+
+						if (
+							rectTuple[2] <= rectTuple[0]
+							or rectTuple[3] <= rectTuple[1]
+							or not _rectsIntersect(rectTuple, dialogRect)
+						):
+							continue
+
+						filteredElements.append(element)
+						candidateTexts = []
+						try:
+							name = element.CurrentName or ""
+							if name:
+								candidateTexts.append(name)
+						except Exception:
+							pass
+						try:
+							helpText = str(element.GetCurrentPropertyValue(30048) or "")
+							if helpText:
+								candidateTexts.append(helpText)
+						except Exception:
+							pass
+						try:
+							autoId = element.CurrentAutomationId or ""
+							if autoId:
+								candidateTexts.append(autoId)
+						except Exception:
+							pass
+
+						for candidateText in candidateTexts:
+							label = _matchPhotoTextConsentActionLabel(candidateText)
+							if label:
+								_considerTarget(label, element, rectTuple)
+								break
+
+					for label, includeKeywords, excludeKeywords in (
+						("同意", ["同意"], ["提供照片", "服務規定"]),
+						("不同意", ["不同意"], []),
+					):
+						if label in targetMatches or not filteredElements:
+							continue
+						element = self._findButtonByKeywords(
+							filteredElements,
+							includeKeywords,
+							excludeKeywords,
+						)
+						if not element:
+							continue
+						try:
+							rect = element.CurrentBoundingRectangle
+							rectTuple = (
+								int(rect.left),
+								int(rect.top),
+								int(rect.right),
+								int(rect.bottom),
+							)
+						except Exception:
+							continue
+						if _rectsIntersect(rectTuple, dialogRect):
+							_considerTarget(label, element, rectTuple)
+
+			stateTargets = {}
+			for label, target in targetMatches.items():
+				stateTargets[label] = {
+					"element": target["element"],
+					"rect": target["rect"],
+					"clickPoint": None,
+				}
+			for label, ocrTarget in ocrActionTargets.items():
+				targetInfo = stateTargets.setdefault(label, {
+					"element": None,
+					"rect": None,
+					"clickPoint": None,
+				})
+				if targetInfo.get("rect") is None and ocrTarget.get("rect") is not None:
+					targetInfo["rect"] = ocrTarget["rect"]
+				if ocrTarget.get("clickPoint") is not None:
+					targetInfo["clickPoint"] = ocrTarget["clickPoint"]
+
+			state.update({
+				"hwnd": hwnd,
+				"dialogRect": dialogRect,
+				"ocrText": ocrText,
+				"actionLabels": actionLabels,
+				"targets": stateTargets,
+			})
+			ocrTargetSummary = {
+				label: target["clickPoint"]
+				for label, target in sorted(ocrActionTargets.items())
+			}
+			log.debug(
+				f"LINE: photo consent dialog state labels={actionLabels}, "
+				f"targets={sorted(state['targets'])}, "
+				f"ocrTargets={ocrTargetSummary}"
+			)
+		except Exception as e:
+			log.debug(f"LINE: capture photo consent dialog state failed: {e}", exc_info=True)
+
+		return state
+
+	def _refreshPhotoTextConsentState(self):
+		"""Merge fresh photo-consent dialog state into the pending session."""
+		state = self._capturePhotoTextConsentState()
+		storedActions = set(getattr(self, "_photoTextConsentDialogActions", ()) or ())
+		storedTargets = dict(getattr(self, "_photoTextConsentDialogTargets", {}) or {})
+		storedRect = getattr(self, "_photoTextConsentDialogRect", None)
+		storedHwnd = getattr(self, "_photoTextConsentDialogHwnd", None)
+
+		mergedActions = storedActions | set(state["actionLabels"]) | set(state["targets"])
+		if state["targets"]:
+			for label, freshTarget in state["targets"].items():
+				mergedTarget = dict(storedTargets.get(label, {}) or {})
+				for key in ("element", "rect", "clickPoint"):
+					value = freshTarget.get(key)
+					if value is not None:
+						mergedTarget[key] = value
+				storedTargets[label] = mergedTarget
+
+		self._photoTextConsentDialogActions = mergedActions
+		self._photoTextConsentDialogTargets = storedTargets
+		self._photoTextConsentDialogRect = state["dialogRect"] or storedRect
+		self._photoTextConsentDialogHwnd = state["hwnd"] or storedHwnd
+
+		return {
+			"hwnd": self._photoTextConsentDialogHwnd,
+			"dialogRect": self._photoTextConsentDialogRect,
+			"ocrText": state["ocrText"],
+			"actionLabels": list(self._photoTextConsentDialogActions),
+			"targets": self._photoTextConsentDialogTargets,
+		}
+
+	def _beginPhotoTextConsent(self):
+		"""Prompt for photo upload consent and bind A/D shortcuts."""
+		self._refreshPhotoTextConsentState()
+		prompt = _getPhotoTextConsentPrompt()
+		if getattr(self, "_photoTextConsentPending", False):
+			ui.message(prompt)
+			return
+
+		token = getattr(self, "_photoTextConsentToken", 0) + 1
+		self._photoTextConsentToken = token
+		self._photoTextConsentPending = True
+		ui.message(prompt)
+		self.bindGesture("kb:a", "acceptPhotoTextConsent")
+		self.bindGesture("kb:d", "declinePhotoTextConsent")
+
+		def _autoDecline():
+			if (
+				getattr(self, "_photoTextConsentPending", False)
+				and getattr(self, "_photoTextConsentToken", 0) == token
+			):
+				self._endPhotoTextConsent("不同意")
+
+		core.callLater(10000, _autoDecline)
+
+	def _isPhotoTextConsentDialogVisible(self):
+		"""Return True when LINE's first-run photo consent dialog is visible."""
+		try:
+			state = self._capturePhotoTextConsentState()
+			if not state["dialogRect"]:
+				return False
+
+			actionLabels = set(state["actionLabels"]) | set(state["targets"])
+			isVisible = _isPhotoTextConsentDialogText(
+				state["ocrText"],
+				actionLabels,
+			)
+			log.debug(
+				f"LINE: photo consent OCR: text={state['ocrText']!r}, "
+				f"actions={sorted(actionLabels)}, visible={isVisible}"
+			)
+			return isVisible
+		except Exception as e:
+			log.debug(f"LINE: photo consent detection failed: {e}", exc_info=True)
+			return False
+
+	def _watchForPhotoTextConsentDialog(self, retriesLeft=8, delayMs=250):
+		"""Poll briefly for LINE's first-run photo consent dialog, then start A/D mode."""
+		watchId = getattr(self, "_photoTextConsentWatchId", 0) + 1
+		self._photoTextConsentWatchId = watchId
+
+		def _poll(remaining):
+			if watchId != getattr(self, "_photoTextConsentWatchId", 0):
+				return
+			if getattr(self, "_photoTextConsentPending", False):
+				return
+			try:
+				foreground = api.getForegroundObject()
+				if not foreground or foreground.appModule.appName != "line":
+					return
+			except Exception:
+				return
+			if self._isPhotoTextConsentDialogVisible():
+				self._beginPhotoTextConsent()
+				return
+			if remaining > 0:
+				core.callLater(delayMs, lambda: _poll(remaining - 1))
+
+		core.callLater(delayMs, lambda: _poll(retriesLeft))
+
+	def _clearPhotoTextConsentBindings(self):
+		"""Clear the transient photo-consent bindings and cached dialog state."""
+		self._photoTextConsentPending = False
+		self._photoTextConsentActionInProgress = False
+		self._photoTextConsentDialogActions = set()
+		self._photoTextConsentDialogTargets = {}
+		self._photoTextConsentDialogRect = None
+		self._photoTextConsentDialogHwnd = None
+
+		import inputCore
+		for key in ("kb:a", "kb:d"):
+			try:
+				normalized = inputCore.normalizeGestureIdentifier(key)
+				if normalized in self._gestureMap:
+					del self._gestureMap[normalized]
+			except Exception:
+				pass
+
+	def _performPhotoTextConsentAction(self, actionName):
+		"""Activate a specific action on the current photo consent dialog."""
+		state = self._refreshPhotoTextConsentState()
+		targetInfo = state["targets"].get(actionName)
+
+		def _clickFallbackPoint():
+			fallbackPoint = _getPhotoTextConsentDialogFallbackClickPoint(
+				actionName,
+				state["dialogRect"],
+			)
+			if not fallbackPoint:
+				return False
+			self._clickAtPosition(
+				fallbackPoint[0],
+				fallbackPoint[1],
+				hwnd=state["hwnd"],
+			)
+			log.info(
+				f"LINE: fallback-clicking photo consent action '{actionName}' "
+				f"at ({fallbackPoint[0]}, {fallbackPoint[1]})"
+			)
+			return True
+
+		if targetInfo:
+			clickPoint = targetInfo.get("clickPoint")
+			if clickPoint:
+				log.info(
+					f"LINE: OCR-clicking photo consent action '{actionName}' "
+					f"at ({clickPoint[0]}, {clickPoint[1]})"
+				)
+				self._clickAtPosition(
+					clickPoint[0],
+					clickPoint[1],
+					hwnd=state["hwnd"],
+				)
+				return True
+			element = targetInfo.get("element")
+			if element and self._invokeElement(element, actionName, announce=False):
+				return True
+			rect = targetInfo.get("rect")
+			if rect:
+				self._clickAtPosition(
+					int((rect[0] + rect[2]) / 2),
+					int((rect[1] + rect[3]) / 2),
+					hwnd=state["hwnd"],
+				)
+				return True
+
+		if _clickFallbackPoint():
+			return True
+
+		if actionName == "不同意":
+			from keyboardHandler import KeyboardInputGesture
+			KeyboardInputGesture.fromName("escape").send()
+			return True
+
+		if actionName == "同意":
+			ui.message(_("找不到同意按鈕"))
+			return False
+
+		ui.message(_("找不到不同意按鈕"))
+		return False
+
+	def _schedulePhotoTextConsentCompletionAnnouncement(self, actionName, token):
+		"""Verify the dialog closed before announcing the photo consent result."""
+		def _finish():
+			if getattr(self, "_photoTextConsentToken", 0) != token:
+				return
+			stillVisible = self._isPhotoTextConsentDialogVisible()
+			self._clearPhotoTextConsentBindings()
+			if stillVisible:
+				if actionName == "同意":
+					ui.message(_("同意提供照片可能未成功"))
+				else:
+					ui.message(_("不同意提供照片可能未成功"))
+				return
+
+			if actionName == "同意":
+				ui.message(_("已同意提供照片"))
+			else:
+				ui.message(_("已不同意提供照片"))
+
+		core.callLater(650, _finish)
+
+	def _endPhotoTextConsent(self, actionName):
+		"""End the photo consent flow by activating the requested dialog action."""
+		if (
+			not getattr(self, "_photoTextConsentPending", False)
+			or getattr(self, "_photoTextConsentActionInProgress", False)
+		):
+			return
+		self._photoTextConsentActionInProgress = True
+		if not self._performPhotoTextConsentAction(actionName):
+			self._photoTextConsentActionInProgress = False
+			return
+
+		token = getattr(self, "_photoTextConsentToken", 0)
+		self._schedulePhotoTextConsentCompletionAnnouncement(actionName, token)
+
+	def script_acceptPhotoTextConsent(self, gesture):
+		"""User pressed A to agree to LINE's first-run photo upload notice."""
+		self._endPhotoTextConsent("同意")
+
+	def script_declinePhotoTextConsent(self, gesture):
+		"""User pressed D to decline LINE's first-run photo upload notice."""
+		self._endPhotoTextConsent("不同意")
 
 	@script(
 		gesture="kb:applications",

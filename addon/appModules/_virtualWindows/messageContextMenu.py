@@ -19,6 +19,13 @@ def _removeCJKSpaces(text):
 	return _CJK_SPACE_RE.sub('', text)
 
 
+_IMAGE_ATTACHMENT_MENU_LABELS = (
+	"轉為文字",
+	"掃描行動條碼",
+	"新增至相簿",
+	"設為聊天室背景",
+)
+
 _KNOWN_MENU_LABELS = (
 	"回覆",
 	"複製",
@@ -31,7 +38,7 @@ _KNOWN_MENU_LABELS = (
 	"設為公告",
 	"另存新檔",
 	"轉傳",
-)
+) + _IMAGE_ATTACHMENT_MENU_LABELS
 
 _MENU_LABEL_ALIASES = {
 	"回覆": ("回覆", "回復", "回覧"),
@@ -51,6 +58,10 @@ _MENU_LABEL_ALIASES = {
 	"設為公告": ("設為公告",),
 	"另存新檔": ("另存新檔",),
 	"轉傳": ("轉傳",),
+	"轉為文字": ("轉為文字",),
+	"掃描行動條碼": ("掃描行動條碼",),
+	"新增至相簿": ("新增至相簿",),
+	"設為聊天室背景": ("設為聊天室背景",),
 }
 
 _NOISE_LINE_RE = re.compile(r"^[\W_]*[\d０-９]+[\W_]*$|^[A-Za-z]{4,}$")
