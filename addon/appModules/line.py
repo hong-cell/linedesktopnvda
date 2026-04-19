@@ -1694,16 +1694,99 @@ _currentChatRoomName = None
 _suppressAddon = False
 
 # Google AI API key used by NVDA+Windows+I image description.
-# This is an AI Studio key bundled for end-user convenience.
-_IMAGE_DESCRIPTION_API_KEY = (
-	"AQ.Ab8RN6KSiZcHSBEjCN7rZN5kP201HIwQJFGPBKdXgxShFZD7HA"
+# The bundled fallback key is stored as an XOR-obfuscated base64 blob so
+# the raw string does not appear in source form. Users can override the
+# key through the "設定圖片描述 API Key" menu item; their own key is
+# persisted with the same obfuscation under NVDA's user config directory.
+_IMAGE_DESCRIPTION_KEY_SALT = b"nvda-line-desktop-2026"
+_IMAGE_DESCRIPTION_DEFAULT_KEY_BLOB = (
+	"Lz8eAH4VKgxUXQUxNC87BBp7ZEljUDEyXVRIJyNaL2QNBzJdMych"
 )
+_IMAGE_DESCRIPTION_USER_KEY_FILENAME = "line_desktop_image_api_key.dat"
 _IMAGE_DESCRIPTION_MODEL = "gemma-4-31b-it"
 _IMAGE_DESCRIPTION_ENDPOINT = (
 	"https://generativelanguage.googleapis.com/v1beta/models/"
 	"{model}:generateContent?key={key}"
 )
 _IMAGE_DESCRIPTION_PROMPT = "請用繁體中文簡要描述這張圖片的內容。"
+
+
+def _obfuscateImageApiKey(plain):
+	"""Reversibly obfuscate an API key string to an ASCII blob."""
+	import base64
+	data = plain.encode("utf-8")
+	salt = _IMAGE_DESCRIPTION_KEY_SALT
+	xored = bytes(b ^ salt[i % len(salt)] for i, b in enumerate(data))
+	return base64.b64encode(xored).decode("ascii")
+
+
+def _deobfuscateImageApiKey(blob):
+	"""Inverse of _obfuscateImageApiKey. Returns the plain key or None."""
+	import base64
+	if not blob:
+		return None
+	try:
+		raw = base64.b64decode(blob.encode("ascii"))
+		salt = _IMAGE_DESCRIPTION_KEY_SALT
+		plain = bytes(
+			b ^ salt[i % len(salt)] for i, b in enumerate(raw)
+		).decode("utf-8")
+	except Exception:
+		return None
+	return plain or None
+
+
+def _getImageApiKeyStorePath():
+	"""Return the filesystem path for the user-supplied API key file."""
+	try:
+		import globalVars
+		configPath = globalVars.appArgs.configPath
+	except Exception:
+		return None
+	if not configPath:
+		return None
+	return os.path.join(configPath, _IMAGE_DESCRIPTION_USER_KEY_FILENAME)
+
+
+def getUserImageApiKey():
+	"""Return the plain API key previously set by the user, or None."""
+	path = _getImageApiKeyStorePath()
+	if not path or not os.path.isfile(path):
+		return None
+	try:
+		with open(path, "r", encoding="utf-8") as f:
+			blob = f.read().strip()
+	except Exception as e:
+		log.debug(f"LINE: failed to read user API key: {e}", exc_info=True)
+		return None
+	return _deobfuscateImageApiKey(blob)
+
+
+def setUserImageApiKey(plain):
+	"""Persist a user-supplied API key (obfuscated). Empty/None clears it."""
+	path = _getImageApiKeyStorePath()
+	if not path:
+		return False
+	try:
+		if not plain:
+			if os.path.isfile(path):
+				os.remove(path)
+			return True
+		blob = _obfuscateImageApiKey(plain)
+		with open(path, "w", encoding="utf-8") as f:
+			f.write(blob)
+		return True
+	except Exception as e:
+		log.warning(f"LINE: failed to save user API key: {e}", exc_info=True)
+		return False
+
+
+def _getEffectiveImageApiKey():
+	"""Return the API key to use for image description requests."""
+	userKey = getUserImageApiKey()
+	if userKey:
+		return userKey
+	return _deobfuscateImageApiKey(_IMAGE_DESCRIPTION_DEFAULT_KEY_BLOB)
 
 _NOTES_WINDOW_KEYWORDS = ("記事本", "note", "keep", "ノート", "บันทึก", "노트")
 _NOTES_OCR_KEYWORDS = (
@@ -1811,9 +1894,13 @@ def _describeImageBytes(pngBytes, timeout=30.0):
 		import base64
 		import json
 		import urllib.request
+		apiKey = _getEffectiveImageApiKey()
+		if not apiKey:
+			log.warning("LINE: no image description API key available")
+			return None
 		url = _IMAGE_DESCRIPTION_ENDPOINT.format(
 			model=_IMAGE_DESCRIPTION_MODEL,
-			key=_IMAGE_DESCRIPTION_API_KEY,
+			key=apiKey,
 		)
 		body = {
 			"contents": [
