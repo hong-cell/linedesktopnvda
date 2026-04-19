@@ -1788,6 +1788,7 @@ def _getEffectiveImageApiKey():
 		return userKey
 	return _deobfuscateImageApiKey(_IMAGE_DESCRIPTION_DEFAULT_KEY_BLOB)
 
+
 _NOTES_WINDOW_KEYWORDS = ("記事本", "note", "keep", "ノート", "บันทึก", "노트")
 _NOTES_OCR_KEYWORDS = (
 	"記事本", "相簿", "已儲存",
