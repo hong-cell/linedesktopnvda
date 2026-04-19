@@ -1694,39 +1694,96 @@ _currentChatRoomName = None
 _suppressAddon = False
 
 # Google AI API key used by NVDA+Windows+I image description.
-# The bundled convenience key is base64-encoded to avoid being trivially
-# grep-able as a plaintext string. It is NOT a secret: this is an open-source
-# addon and any determined reader can recover it. Its purpose is to spare
-# casual end-users from having to obtain their own key. Users can override
-# it at any time through the "設定圖片描述 API Key" menu item; their key
-# is persisted (also encoded) under NVDA's user config directory.
+# The bundled convenience key is encrypted with a PBKDF2-HMAC-SHA256 derived
+# keystream plus HMAC integrity tag, using a per-blob random salt, so the
+# ciphertext is opaque to naive string / pattern extraction. It is NOT a
+# cryptographic secret: this is an open-source addon and a determined reader
+# can still recover it by running the decryption code. Its purpose is to
+# raise the bar for casual extraction and to spare end-users from having to
+# obtain their own key. Users can override it at any time through the
+# "設定圖片描述 API Key" menu item; their key is persisted (also encrypted)
+# under NVDA's user config directory.
 _IMAGE_DESCRIPTION_DEFAULT_KEY_BLOB = (
-	"Lz8eAH4VKgxUXQUxNC87BBp7ZEljUDEyXVRIJyNaL2QNBzJdMych"
+	"g+Ku1l+8YmbpO4/JPwy+ZyMlZw4Nfm9gO5bbn8K/vPkz7VFo"
+	"MRpiFsx2hgfKpUqbxmWqQGo2h8Ph7YjZljEEFkmc3+HlxuE="
 )
 _IMAGE_DESCRIPTION_USER_KEY_FILENAME = "line_desktop_image_api_key.dat"
-_IMAGE_DESCRIPTION_MODEL = "gemma-4-31b-it"
+_IMAGE_DESCRIPTION_MODEL = "gemma-4-26b-a4b-it"
 _IMAGE_DESCRIPTION_ENDPOINT = (
 	"https://generativelanguage.googleapis.com/v1beta/models/"
 	"{model}:generateContent?key={key}"
 )
 _IMAGE_DESCRIPTION_PROMPT = "請用繁體中文簡要描述這張圖片的內容。"
 
+_IMAGE_API_KEY_SALT_LEN = 16
+_IMAGE_API_KEY_MAC_LEN = 16
+_IMAGE_API_KEY_PBKDF2_ITERS = 100000
+
+# Sentinel indicating the effective API key has not been computed yet.
+_NOT_COMPUTED = object()
+# Populated once at AppModule.__init__ via _initEffectiveImageApiKey().
+# After that, _getEffectiveImageApiKey() is a pure memory read (no PBKDF2).
+_cachedEffectiveImageApiKey = _NOT_COMPUTED
+
+
+def _deriveImageApiKeyMaterial(salt, length):
+	import hashlib
+	import hmac
+	import struct
+	# Passphrase is assembled at call time rather than stored as a single
+	# module-level literal, so a plain string dump of the .pyc is less
+	# revealing about what the blob decrypts to.
+	_p = (b"nvda", b"-line-", b"desktop-", b"image-", b"api-", b"2026-", b"v2")
+	passphrase = b"".join(_p)
+	master = hashlib.pbkdf2_hmac(
+		"sha256", passphrase, salt, _IMAGE_API_KEY_PBKDF2_ITERS, dklen=32
+	)
+	stream = bytearray()
+	counter = 0
+	while len(stream) < length:
+		counter += 1
+		stream.extend(
+			hmac.new(master, struct.pack(">I", counter), hashlib.sha256).digest()
+		)
+	return bytes(stream[:length]), master
+
 
 def _obfuscateImageApiKey(plain):
 	import base64
-	_s = b"nvda-line-desktop-2026"
-	xored = bytes(b ^ _s[i % len(_s)] for i, b in enumerate(plain.encode("utf-8")))
-	return base64.b64encode(xored).decode("ascii")
+	import hashlib
+	import hmac
+	data = plain.encode("utf-8")
+	salt = os.urandom(_IMAGE_API_KEY_SALT_LEN)
+	stream, master = _deriveImageApiKeyMaterial(salt, len(data))
+	cipher = bytes(a ^ b for a, b in zip(data, stream))
+	mac = hmac.new(master, salt + cipher, hashlib.sha256).digest()[
+		:_IMAGE_API_KEY_MAC_LEN
+	]
+	return base64.b64encode(salt + mac + cipher).decode("ascii")
 
 
 def _deobfuscateImageApiKey(blob):
 	import base64
+	import hashlib
+	import hmac
 	if not blob:
 		return None
 	try:
-		_s = b"nvda-line-desktop-2026"
 		raw = base64.b64decode(blob.encode("ascii"))
-		plain = bytes(b ^ _s[i % len(_s)] for i, b in enumerate(raw)).decode("utf-8")
+		if len(raw) < _IMAGE_API_KEY_SALT_LEN + _IMAGE_API_KEY_MAC_LEN:
+			return None
+		salt = raw[:_IMAGE_API_KEY_SALT_LEN]
+		mac = raw[
+			_IMAGE_API_KEY_SALT_LEN:_IMAGE_API_KEY_SALT_LEN + _IMAGE_API_KEY_MAC_LEN
+		]
+		cipher = raw[_IMAGE_API_KEY_SALT_LEN + _IMAGE_API_KEY_MAC_LEN:]
+		stream, master = _deriveImageApiKeyMaterial(salt, len(cipher))
+		expected = hmac.new(master, salt + cipher, hashlib.sha256).digest()[
+			:_IMAGE_API_KEY_MAC_LEN
+		]
+		if not hmac.compare_digest(mac, expected):
+			return None
+		plain = bytes(a ^ b for a, b in zip(cipher, stream)).decode("utf-8")
 	except Exception:
 		return None
 	return plain or None
@@ -1760,6 +1817,7 @@ def getUserImageApiKey():
 
 def setUserImageApiKey(plain):
 	"""Persist a user-supplied API key (obfuscated). Empty/None clears it."""
+	global _cachedEffectiveImageApiKey
 	path = _getImageApiKeyStorePath()
 	if not path:
 		return False
@@ -1767,22 +1825,34 @@ def setUserImageApiKey(plain):
 		if not plain:
 			if os.path.isfile(path):
 				os.remove(path)
-			return True
-		blob = _obfuscateImageApiKey(plain)
-		with open(path, "w", encoding="utf-8") as f:
-			f.write(blob)
+			_cachedEffectiveImageApiKey = (
+				_deobfuscateImageApiKey(_IMAGE_DESCRIPTION_DEFAULT_KEY_BLOB)
+			)
+		else:
+			blob = _obfuscateImageApiKey(plain)
+			with open(path, "w", encoding="utf-8") as f:
+				f.write(blob)
+			_cachedEffectiveImageApiKey = plain
 		return True
 	except Exception as e:
 		log.warning(f"LINE: failed to save user API key: {e}", exc_info=True)
 		return False
 
 
-def _getEffectiveImageApiKey():
-	"""Return the API key to use for image description requests."""
+def _initEffectiveImageApiKey():
+	"""Decrypt and cache the effective API key. Called once at addon startup."""
+	global _cachedEffectiveImageApiKey
 	userKey = getUserImageApiKey()
-	if userKey:
-		return userKey
-	return _deobfuscateImageApiKey(_IMAGE_DESCRIPTION_DEFAULT_KEY_BLOB)
+	_cachedEffectiveImageApiKey = (
+		userKey or _deobfuscateImageApiKey(_IMAGE_DESCRIPTION_DEFAULT_KEY_BLOB)
+	)
+
+
+def _getEffectiveImageApiKey():
+	"""Return the cached API key; falls back to lazy init if not yet computed."""
+	if _cachedEffectiveImageApiKey is _NOT_COMPUTED:
+		_initEffectiveImageApiKey()
+	return _cachedEffectiveImageApiKey
 
 
 _NOTES_WINDOW_KEYWORDS = ("記事本", "note", "keep", "ノート", "บันทึก", "노트")
@@ -1884,17 +1954,21 @@ def _captureRegionAsPng(left, top, width, height):
 
 
 def _describeImageBytes(pngBytes, timeout=30.0):
-	"""Send PNG image bytes to Google AI and return the description, or None."""
+	"""Send PNG image bytes to Google AI and return (description, error_msg).
+
+	Returns (text, None) on success or (None, error_msg) on failure.
+	"""
 	if not pngBytes:
-		return None
+		return None, _("無法取得圖片資料")
 	try:
 		import base64
 		import json
 		import urllib.request
+		import urllib.error
 		apiKey = _getEffectiveImageApiKey()
 		if not apiKey:
 			log.warning("LINE: no image description API key available")
-			return None
+			return None, _("未設定 API Key")
 		url = _IMAGE_DESCRIPTION_ENDPOINT.format(
 			model=_IMAGE_DESCRIPTION_MODEL,
 			key=apiKey,
@@ -1922,15 +1996,25 @@ def _describeImageBytes(pngBytes, timeout=30.0):
 			headers={"Content-Type": "application/json"},
 			method="POST",
 		)
-		with urllib.request.urlopen(req, timeout=timeout) as resp:
-			raw = resp.read()
+		try:
+			with urllib.request.urlopen(req, timeout=timeout) as resp:
+				raw = resp.read()
+		except urllib.error.HTTPError as e:
+			errBody = e.read().decode("utf-8", errors="replace")
+			log.warning(
+				f"LINE: image description HTTP {e.code} {e.reason}: {errBody[:500]}",
+			)
+			return None, _("圖片描述失敗 (HTTP {code})").format(code=e.code)
+		except Exception as e:
+			log.warning(f"LINE: image description network error: {e}", exc_info=True)
+			return None, _("圖片描述失敗 (網路錯誤)")
 		data = json.loads(raw.decode("utf-8", errors="replace"))
 	except Exception as e:
 		log.warning(
 			f"LINE: image description request failed: {e}",
 			exc_info=True,
 		)
-		return None
+		return None, _("圖片描述失敗")
 
 	try:
 		candidates = data.get("candidates") or []
@@ -1938,7 +2022,7 @@ def _describeImageBytes(pngBytes, timeout=30.0):
 			log.info(
 				f"LINE: image description returned no candidates: {data!r}"
 			)
-			return None
+			return None, _("圖片描述失敗 (無回應)")
 		parts = (
 			candidates[0].get("content", {}).get("parts", [])
 			if isinstance(candidates[0], dict)
@@ -1948,13 +2032,13 @@ def _describeImageBytes(pngBytes, timeout=30.0):
 			if isinstance(part, dict):
 				text = part.get("text")
 				if text:
-					return text.strip()
+					return text.strip(), None
 	except Exception as e:
 		log.warning(
 			f"LINE: image description response parse failed: {e}",
 			exc_info=True,
 		)
-	return None
+	return None, _("圖片描述失敗")
 
 
 def _getDpiScale(hwnd=None):
@@ -4756,6 +4840,9 @@ class AppModule(appModuleHandler.AppModule):
 		self._lineVersion = _readLineVersion()
 		self._lineLanguage = _readLineLanguage()
 		self._qtAccessibleSet = _isQtAccessibleSet()
+		# Decrypt the image API key once at startup so PBKDF2 never runs
+		# during an actual image-description request.
+		_initEffectiveImageApiKey()
 		log.info(
 			f"LINE AppModule loaded for process: {self.processID}, "
 			f"exe: {self.appName}, "
@@ -8769,11 +8856,11 @@ class AppModule(appModuleHandler.AppModule):
 
 		def _worker():
 			import wx
-			description = _describeImageBytes(pngBytes)
+			description, errMsg = _describeImageBytes(pngBytes)
 			if description:
 				wx.CallAfter(ui.message, description)
 			else:
-				wx.CallAfter(ui.message, _("圖片描述失敗"))
+				wx.CallAfter(ui.message, errMsg or _("圖片描述失敗"))
 
 		threading.Thread(target=_worker, daemon=True).start()
 
