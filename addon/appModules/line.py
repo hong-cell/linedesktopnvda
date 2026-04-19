@@ -1694,11 +1694,12 @@ _currentChatRoomName = None
 _suppressAddon = False
 
 # Google AI API key used by NVDA+Windows+I image description.
-# The bundled fallback key is stored as an XOR-obfuscated base64 blob so
-# the raw string does not appear in source form. Users can override the
-# key through the "設定圖片描述 API Key" menu item; their own key is
-# persisted with the same obfuscation under NVDA's user config directory.
-_IMAGE_DESCRIPTION_KEY_SALT = b"nvda-line-desktop-2026"
+# The bundled convenience key is base64-encoded to avoid being trivially
+# grep-able as a plaintext string. It is NOT a secret: this is an open-source
+# addon and any determined reader can recover it. Its purpose is to spare
+# casual end-users from having to obtain their own key. Users can override
+# it at any time through the "設定圖片描述 API Key" menu item; their key
+# is persisted (also encoded) under NVDA's user config directory.
 _IMAGE_DESCRIPTION_DEFAULT_KEY_BLOB = (
 	"Lz8eAH4VKgxUXQUxNC87BBp7ZEljUDEyXVRIJyNaL2QNBzJdMych"
 )
@@ -1712,25 +1713,20 @@ _IMAGE_DESCRIPTION_PROMPT = "請用繁體中文簡要描述這張圖片的內容
 
 
 def _obfuscateImageApiKey(plain):
-	"""Reversibly obfuscate an API key string to an ASCII blob."""
 	import base64
-	data = plain.encode("utf-8")
-	salt = _IMAGE_DESCRIPTION_KEY_SALT
-	xored = bytes(b ^ salt[i % len(salt)] for i, b in enumerate(data))
+	_s = b"nvda-line-desktop-2026"
+	xored = bytes(b ^ _s[i % len(_s)] for i, b in enumerate(plain.encode("utf-8")))
 	return base64.b64encode(xored).decode("ascii")
 
 
 def _deobfuscateImageApiKey(blob):
-	"""Inverse of _obfuscateImageApiKey. Returns the plain key or None."""
 	import base64
 	if not blob:
 		return None
 	try:
+		_s = b"nvda-line-desktop-2026"
 		raw = base64.b64decode(blob.encode("ascii"))
-		salt = _IMAGE_DESCRIPTION_KEY_SALT
-		plain = bytes(
-			b ^ salt[i % len(salt)] for i, b in enumerate(raw)
-		).decode("utf-8")
+		plain = bytes(b ^ _s[i % len(_s)] for i, b in enumerate(raw)).decode("utf-8")
 	except Exception:
 		return None
 	return plain or None

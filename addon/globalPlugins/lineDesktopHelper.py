@@ -555,6 +555,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			if dlg.ShowModal() != wx.ID_OK:
 				return
 			newKey = dlg.GetValue().strip()
+		except Exception as e:
+			log.warning(f"LINE: image API key dialog error: {e}", exc_info=True)
+			ui.message(_("設定 API Key 時發生錯誤"))
+			return
 		finally:
 			dlg.Destroy()
 
