@@ -206,6 +206,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 				# Translators: Menu item for toggling Qt accessibility env var
 				_("切換 Qt 無障礙環境變數(&Q)"),
 			)
+			self._imageApiKeyItem = self._lineSubMenu.Append(
+				wx.ID_ANY,
+				# Translators: Menu item for setting the image-description API key
+				_("設定圖片描述 API Key(&I)"),
+			)
 
 			# Bind events
 			gui.mainFrame.sysTrayIcon.Bind(
@@ -252,6 +257,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			)
 			gui.mainFrame.sysTrayIcon.Bind(
 				wx.EVT_MENU, self._onToggleQtAccessible, self._qtAccessibleItem
+			)
+			gui.mainFrame.sysTrayIcon.Bind(
+				wx.EVT_MENU, self._onSetImageApiKey, self._imageApiKeyItem
 			)
 
 			# Add the submenu to NVDA's Tools menu
@@ -516,6 +524,51 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 				ui.message(_("已設定 QT_ACCESSIBILITY=1，重啟 LINE 後生效"))
 			else:
 				ui.message(_("設定 QT_ACCESSIBILITY 環境變數失敗"))
+
+	def _onSetImageApiKey(self, evt):
+		wx.CallAfter(self._doSetImageApiKey)
+
+	def _doSetImageApiKey(self):
+		import ui
+		try:
+			from appModules.line import (
+				getUserImageApiKey, setUserImageApiKey,
+			)
+		except Exception as e:
+			log.warning(f"LINE: cannot load image API key helpers: {e}", exc_info=True)
+			ui.message(_("無法載入 API Key 設定"))
+			return
+
+		current = getUserImageApiKey() or ""
+		dlg = wx.TextEntryDialog(
+			gui.mainFrame,
+			# Translators: Prompt shown in the image-description API key dialog
+			_(
+				"請輸入您自己的 Google AI API Key。\n"
+				"留空則使用預設作者提供的金鑰。"
+			),
+			# Translators: Title of the image-description API key dialog
+			_("LINE Desktop - 圖片描述 API Key"),
+			current,
+		)
+		try:
+			if dlg.ShowModal() != wx.ID_OK:
+				return
+			newKey = dlg.GetValue().strip()
+		except Exception as e:
+			log.warning(f"LINE: image API key dialog error: {e}", exc_info=True)
+			ui.message(_("設定 API Key 時發生錯誤"))
+			return
+		finally:
+			dlg.Destroy()
+
+		if setUserImageApiKey(newKey):
+			if newKey:
+				ui.message(_("已儲存自訂 API Key"))
+			else:
+				ui.message(_("已清除，將使用預設 API Key"))
+		else:
+			ui.message(_("儲存 API Key 失敗"))
 
 	def terminate(self, *args, **kwargs):
 		self._removeToolsMenu()
