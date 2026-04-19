@@ -7,6 +7,8 @@ import globalPluginHandler
 from scriptHandler import script
 from logHandler import log
 import gui
+from gui import guiHelper
+from gui.settingsDialogs import SettingsPanel
 import wx
 import winreg
 import ctypes
@@ -77,6 +79,54 @@ def _getLineAppModule():
 	return None
 
 
+class LineDesktopSettingsPanel(SettingsPanel):
+	"""Settings panel shown under NVDA Preferences → Settings → LINE Desktop."""
+
+	# Translators: Title of the LINE Desktop settings panel in NVDA Preferences
+	title = _("LINE Desktop")
+
+	def makeSettings(self, settingsSizer):
+		sHelper = guiHelper.BoxSizerHelper(self, sizer=settingsSizer)
+
+		# Translators: Checkbox label in LINE Desktop settings panel
+		qtLabel = _("啟用 Qt 無障礙環境變數 QT_ACCESSIBILITY=1 (&Q)")
+		self._qtCheck = sHelper.addItem(wx.CheckBox(self, label=qtLabel))
+		self._qtCheck.SetValue(_isQtAccessibleSet())
+
+		# Translators: Text field label for the image-description API key
+		apiLabel = _("圖片描述 API Key，留空則使用預設金鑰 (&I)")
+		self._apiKeyText = sHelper.addLabeledControl(apiLabel, wx.TextCtrl)
+		self._apiKeyText.SetValue(self._loadCurrentApiKey())
+
+	def _loadCurrentApiKey(self):
+		try:
+			from appModules.line import getUserImageApiKey
+			return getUserImageApiKey() or ""
+		except Exception:
+			log.debug("LINE: cannot load user API key for settings panel", exc_info=True)
+			return ""
+
+	def onSave(self):
+		# Qt accessibility env var
+		wantSet = bool(self._qtCheck.GetValue())
+		if wantSet != _isQtAccessibleSet():
+			_setQtAccessible(wantSet)
+
+		# Image description API key
+		try:
+			from appModules.line import getUserImageApiKey, setUserImageApiKey
+		except Exception:
+			log.warning(
+				"LINE: cannot load image API key helpers from settings panel",
+				exc_info=True,
+			)
+			return
+		newKey = self._apiKeyText.GetValue().strip()
+		currentKey = getUserImageApiKey() or ""
+		if newKey != currentKey:
+			setUserImageApiKey(newKey)
+
+
 class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 	"""Global plugin to ensure the LINE appModule is loaded
 	for all known LINE desktop executable variants.
@@ -112,6 +162,28 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		self._toolsMenu = None
 		self._lineSubMenu = None
 		self._createToolsMenu()
+		self._registerSettingsPanel()
+
+	def _registerSettingsPanel(self):
+		try:
+			if LineDesktopSettingsPanel not in gui.NVDASettingsDialog.categoryClasses:
+				gui.NVDASettingsDialog.categoryClasses.append(LineDesktopSettingsPanel)
+		except Exception:
+			log.debugWarning(
+				"Failed to register LINE Desktop settings panel",
+				exc_info=True,
+			)
+
+	def _unregisterSettingsPanel(self):
+		try:
+			gui.NVDASettingsDialog.categoryClasses.remove(LineDesktopSettingsPanel)
+		except (ValueError, AttributeError):
+			pass
+		except Exception:
+			log.debugWarning(
+				"Failed to unregister LINE Desktop settings panel",
+				exc_info=True,
+			)
 
 	def _createToolsMenu(self):
 		"""Create the LINE Desktop submenu under NVDA Tools menu."""
@@ -198,20 +270,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 				_("跳到通話視窗(&F)") + "\tNVDA+Windows+F",
 			)
 
-			self._lineSubMenu.AppendSeparator()
-
-			# ── Settings ──
-			self._qtAccessibleItem = self._lineSubMenu.Append(
-				wx.ID_ANY,
-				# Translators: Menu item for toggling Qt accessibility env var
-				_("切換 Qt 無障礙環境變數(&Q)"),
-			)
-			self._imageApiKeyItem = self._lineSubMenu.Append(
-				wx.ID_ANY,
-				# Translators: Menu item for setting the image-description API key
-				_("設定圖片描述 API Key(&I)"),
-			)
-
 			# Bind events
 			gui.mainFrame.sysTrayIcon.Bind(
 				wx.EVT_MENU, self._onAllChats, self._allChatsItem
@@ -254,12 +312,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			)
 			gui.mainFrame.sysTrayIcon.Bind(
 				wx.EVT_MENU, self._onFocusCallWindow, self._focusCallItem
-			)
-			gui.mainFrame.sysTrayIcon.Bind(
-				wx.EVT_MENU, self._onToggleQtAccessible, self._qtAccessibleItem
-			)
-			gui.mainFrame.sysTrayIcon.Bind(
-				wx.EVT_MENU, self._onSetImageApiKey, self._imageApiKeyItem
 			)
 
 			# Add the submenu to NVDA's Tools menu
@@ -503,75 +555,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			log.warning(f"LINE focusCallWindow error: {e}", exc_info=True)
 			ui.message(_("跳到通話視窗功能錯誤: {error}").format(error=e))
 
-	def _onToggleQtAccessible(self, evt):
-		wx.CallAfter(self._doToggleQtAccessible)
-
-	def _doToggleQtAccessible(self):
-		import ui
-		lineApp = _getLineAppModule()
-		if lineApp and hasattr(lineApp, 'script_toggleQtAccessible'):
-			lineApp.script_toggleQtAccessible(None)
-			return
-		# LINE not running — toggle the env var directly
-		currentlySet = _isQtAccessibleSet()
-		if currentlySet:
-			if _setQtAccessible(False):
-				ui.message(_("已移除 QT_ACCESSIBILITY 環境變數，重啟 LINE 後生效"))
-			else:
-				ui.message(_("移除 QT_ACCESSIBILITY 環境變數失敗"))
-		else:
-			if _setQtAccessible(True):
-				ui.message(_("已設定 QT_ACCESSIBILITY=1，重啟 LINE 後生效"))
-			else:
-				ui.message(_("設定 QT_ACCESSIBILITY 環境變數失敗"))
-
-	def _onSetImageApiKey(self, evt):
-		wx.CallAfter(self._doSetImageApiKey)
-
-	def _doSetImageApiKey(self):
-		import ui
-		try:
-			from appModules.line import (
-				getUserImageApiKey, setUserImageApiKey,
-			)
-		except Exception as e:
-			log.warning(f"LINE: cannot load image API key helpers: {e}", exc_info=True)
-			ui.message(_("無法載入 API Key 設定"))
-			return
-
-		current = getUserImageApiKey() or ""
-		dlg = wx.TextEntryDialog(
-			gui.mainFrame,
-			# Translators: Prompt shown in the image-description API key dialog
-			_(
-				"請輸入您自己的 Google AI API Key。\n"
-				"留空則使用預設作者提供的金鑰。"
-			),
-			# Translators: Title of the image-description API key dialog
-			_("LINE Desktop - 圖片描述 API Key"),
-			current,
-		)
-		try:
-			if dlg.ShowModal() != wx.ID_OK:
-				return
-			newKey = dlg.GetValue().strip()
-		except Exception as e:
-			log.warning(f"LINE: image API key dialog error: {e}", exc_info=True)
-			ui.message(_("設定 API Key 時發生錯誤"))
-			return
-		finally:
-			dlg.Destroy()
-
-		if setUserImageApiKey(newKey):
-			if newKey:
-				ui.message(_("已儲存自訂 API Key"))
-			else:
-				ui.message(_("已清除，將使用預設 API Key"))
-		else:
-			ui.message(_("儲存 API Key 失敗"))
-
 	def terminate(self, *args, **kwargs):
 		self._removeToolsMenu()
+		self._unregisterSettingsPanel()
 		super().terminate(*args, **kwargs)
 		for exe in self._LINE_EXECUTABLES:
 			try:
