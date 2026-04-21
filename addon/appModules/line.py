@@ -1696,7 +1696,26 @@ _IMAGE_DESCRIPTION_DEFAULT_KEY_BLOB = (
 	"g+Ku1l+8YmbpO4/JPwy+ZyMlZw4Nfm9gO5bbn8K/vPkz7VFoMRpiFsx2hgfKpUqbxmWqQGo2h8Ph7YjZljEEFkmc3+HlxuE="
 )
 _IMAGE_DESCRIPTION_USER_KEY_FILENAME = "line_desktop_image_api_key.dat"
-_IMAGE_DESCRIPTION_MODEL = "gemma-4-26b-a4b-it"
+_IMAGE_DESCRIPTION_USER_MODEL_FILENAME = "line_desktop_image_model.txt"
+# Default model used when the user has not picked one in the settings panel.
+_IMAGE_DESCRIPTION_DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
+# Models exposed in the settings panel dropdown. The order here is the order
+# the user sees. Strings are the actual model IDs sent to the API endpoint.
+# NOTE: "gemma-3-27b-it" maps to the UI label "Gemma 3 27B" — confirm the
+# exact API model ID before trusting it for production use.
+_IMAGE_DESCRIPTION_AVAILABLE_MODELS = (
+	"gemini-3-flash-preview",
+	"gemini-3.1-flash-lite-preview",
+	"gemini-flash-latest",
+	"gemini-flash-lite-latest",
+	"gemini-2.5-flash",
+	"gemini-2.5-flash-lite",
+	"gemini-2.0-flash",
+	"gemini-2.0-flash-lite",
+	"gemma-4-26b-a4b-it",
+	"gemma-4-31b-it",
+	"gemma-3-27b-it",
+)
 _IMAGE_DESCRIPTION_ENDPOINT = (
 	"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 )
@@ -1840,6 +1859,64 @@ def _getEffectiveImageApiKey():
 	return _cachedEffectiveImageApiKey
 
 
+def _getImageModelStorePath():
+	"""Return the filesystem path for the user-selected model preference."""
+	try:
+		import globalVars
+
+		configPath = globalVars.appArgs.configPath
+	except Exception:
+		return None
+	if not configPath:
+		return None
+	return os.path.join(configPath, _IMAGE_DESCRIPTION_USER_MODEL_FILENAME)
+
+
+def getUserImageModel():
+	"""Return the model ID previously chosen by the user, or None."""
+	path = _getImageModelStorePath()
+	if not path or not os.path.isfile(path):
+		return None
+	try:
+		with open(path, "r", encoding="utf-8") as f:
+			value = f.read().strip()
+	except Exception as e:
+		log.debug(f"LINE: failed to read user image model: {e}", exc_info=True)
+		return None
+	if not value:
+		return None
+	if value not in _IMAGE_DESCRIPTION_AVAILABLE_MODELS:
+		log.debug(f"LINE: stored image model {value!r} is not in the allowed list")
+		return None
+	return value
+
+
+def setUserImageModel(name):
+	"""Persist a user-selected model. Empty/None or the default clears the file."""
+	path = _getImageModelStorePath()
+	if not path:
+		return False
+	try:
+		if not name or name == _IMAGE_DESCRIPTION_DEFAULT_MODEL:
+			if os.path.isfile(path):
+				os.remove(path)
+			return True
+		if name not in _IMAGE_DESCRIPTION_AVAILABLE_MODELS:
+			log.warning(f"LINE: refusing to save unknown image model {name!r}")
+			return False
+		with open(path, "w", encoding="utf-8") as f:
+			f.write(name)
+		return True
+	except Exception as e:
+		log.warning(f"LINE: failed to save user image model: {e}", exc_info=True)
+		return False
+
+
+def _getEffectiveImageModel():
+	"""Return the model ID to use for image description requests."""
+	return getUserImageModel() or _IMAGE_DESCRIPTION_DEFAULT_MODEL
+
+
 _NOTES_WINDOW_KEYWORDS = ("記事本", "note", "keep", "ノート", "บันทึก", "노트")
 _NOTES_OCR_KEYWORDS = (
 	"記事本",
@@ -1962,7 +2039,7 @@ def _describeImageBytes(pngBytes, timeout=30.0):
 			log.warning("LINE: no image description API key available")
 			return None, _("未設定 API Key")
 		url = _IMAGE_DESCRIPTION_ENDPOINT.format(
-			model=_IMAGE_DESCRIPTION_MODEL,
+			model=_getEffectiveImageModel(),
 			key=apiKey,
 		)
 		body = {
