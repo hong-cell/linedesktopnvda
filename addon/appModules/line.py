@@ -1697,6 +1697,7 @@ _IMAGE_DESCRIPTION_DEFAULT_KEY_BLOB = (
 )
 _IMAGE_DESCRIPTION_USER_KEY_FILENAME = "line_desktop_image_api_key.dat"
 _IMAGE_DESCRIPTION_USER_MODEL_FILENAME = "line_desktop_image_model.txt"
+_IMAGE_DESCRIPTION_USER_PROMPT_FILENAME = "line_desktop_image_prompt.txt"
 # Default model used when the user has not picked one in the settings panel.
 _IMAGE_DESCRIPTION_DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
 # Models exposed in the settings panel dropdown. The order here is the order
@@ -1723,7 +1724,10 @@ _IMAGE_DESCRIPTION_AVAILABLE_MODELS = (
 _IMAGE_DESCRIPTION_ENDPOINT = (
 	"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 )
-_IMAGE_DESCRIPTION_PROMPT = "請用繁體中文簡要描述這張圖片的內容。"
+_IMAGE_DESCRIPTION_DEFAULT_PROMPT = "請用繁體中文簡要描述這張圖片的內容。"
+# Maximum length accepted from user-supplied prompts, to avoid pathological
+# payloads being sent to the API.
+_IMAGE_DESCRIPTION_PROMPT_MAX_LEN = 2000
 
 _IMAGE_API_KEY_SALT_LEN = 16
 _IMAGE_API_KEY_MAC_LEN = 16
@@ -1930,6 +1934,71 @@ def _getEffectiveImageModel():
 	return _cachedEffectiveImageModel
 
 
+def _getImagePromptStorePath():
+	"""Return the filesystem path for the user-supplied description prompt."""
+	try:
+		import globalVars
+
+		configPath = globalVars.appArgs.configPath
+	except Exception:
+		return None
+	if not configPath:
+		return None
+	return os.path.join(configPath, _IMAGE_DESCRIPTION_USER_PROMPT_FILENAME)
+
+
+def getUserImagePrompt():
+	"""Return the prompt previously set by the user, or None."""
+	path = _getImagePromptStorePath()
+	if not path or not os.path.isfile(path):
+		return None
+	try:
+		with open(path, "r", encoding="utf-8") as f:
+			value = f.read()
+	except Exception as e:
+		log.debug(f"LINE: failed to read user image prompt: {e}", exc_info=True)
+		return None
+	value = value.strip()
+	if not value:
+		return None
+	return value
+
+
+_cachedEffectiveImagePrompt = _NOT_COMPUTED
+
+
+def setUserImagePrompt(text):
+	"""Persist a user-supplied prompt. Empty/None or the default clears the file."""
+	global _cachedEffectiveImagePrompt
+	path = _getImagePromptStorePath()
+	if not path:
+		return False
+	try:
+		cleaned = (text or "").strip()
+		if cleaned:
+			cleaned = cleaned[:_IMAGE_DESCRIPTION_PROMPT_MAX_LEN]
+		if not cleaned or cleaned == _IMAGE_DESCRIPTION_DEFAULT_PROMPT:
+			if os.path.isfile(path):
+				os.remove(path)
+			_cachedEffectiveImagePrompt = _IMAGE_DESCRIPTION_DEFAULT_PROMPT
+			return True
+		with open(path, "w", encoding="utf-8") as f:
+			f.write(cleaned)
+		_cachedEffectiveImagePrompt = cleaned
+		return True
+	except Exception as e:
+		log.warning(f"LINE: failed to save user image prompt: {e}", exc_info=True)
+		return False
+
+
+def _getEffectiveImagePrompt():
+	"""Return the cached prompt; lazily resolved from disk on first call."""
+	global _cachedEffectiveImagePrompt
+	if _cachedEffectiveImagePrompt is _NOT_COMPUTED:
+		_cachedEffectiveImagePrompt = getUserImagePrompt() or _IMAGE_DESCRIPTION_DEFAULT_PROMPT
+	return _cachedEffectiveImagePrompt
+
+
 _NOTES_WINDOW_KEYWORDS = ("記事本", "note", "keep", "ノート", "บันทึก", "노트")
 _NOTES_OCR_KEYWORDS = (
 	"記事本",
@@ -2059,7 +2128,7 @@ def _describeImageBytes(pngBytes, timeout=30.0):
 			"contents": [
 				{
 					"parts": [
-						{"text": _IMAGE_DESCRIPTION_PROMPT},
+						{"text": _getEffectiveImagePrompt()},
 						{
 							"inline_data": {
 								"mime_type": "image/png",

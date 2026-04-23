@@ -131,6 +131,16 @@ class LineDesktopSettingsPanel(SettingsPanel):
 		if self._modelChoices:
 			self._modelChoice.SetSelection(selectIndex)
 
+		# Translators: Text field label for the image-description prompt
+		promptLabel = _("圖片描述提示詞，留空則使用預設 (&P)")
+		self._promptText = sHelper.addLabeledControl(
+			promptLabel,
+			wx.TextCtrl,
+			style=wx.TE_MULTILINE,
+			size=(-1, 80),
+		)
+		self._promptText.SetValue(self._loadCurrentPrompt())
+
 	def _loadCurrentApiKey(self):
 		try:
 			from appModules.line import getUserImageApiKey
@@ -158,6 +168,18 @@ class LineDesktopSettingsPanel(SettingsPanel):
 		except Exception:
 			log.debug("LINE: cannot load image model options", exc_info=True)
 			return ((), "", "")
+
+	def _loadCurrentPrompt(self):
+		try:
+			from appModules.line import (
+				_IMAGE_DESCRIPTION_DEFAULT_PROMPT,
+				getUserImagePrompt,
+			)
+
+			return getUserImagePrompt() or _IMAGE_DESCRIPTION_DEFAULT_PROMPT
+		except Exception:
+			log.debug("LINE: cannot load image prompt for settings panel", exc_info=True)
+			return ""
 
 	def onSave(self):
 		# Qt accessibility env var
@@ -225,6 +247,31 @@ class LineDesktopSettingsPanel(SettingsPanel):
 		except Exception:
 			log.warning(
 				"LINE: cannot load image model helpers from settings panel",
+				exc_info=True,
+			)
+
+		# Image description prompt
+		try:
+			from appModules.line import (
+				_IMAGE_DESCRIPTION_DEFAULT_PROMPT,
+				getUserImagePrompt,
+				setUserImagePrompt,
+			)
+
+			newPrompt = self._promptText.GetValue().strip()
+			currentPrompt = getUserImagePrompt() or _IMAGE_DESCRIPTION_DEFAULT_PROMPT
+			if newPrompt != currentPrompt:
+				if not setUserImagePrompt(newPrompt):
+					gui.messageBox(
+						# Translators: Error shown when saving the image prompt fails
+						_("儲存圖片描述提示詞失敗，請重試。"),
+						_("LINE Desktop - 設定錯誤"),
+						wx.OK | wx.ICON_ERROR,
+						self,
+					)
+		except Exception:
+			log.warning(
+				"LINE: cannot load image prompt helpers from settings panel",
 				exc_info=True,
 			)
 
