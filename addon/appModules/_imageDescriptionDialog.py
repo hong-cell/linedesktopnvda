@@ -6,13 +6,7 @@ from logHandler import log
 
 
 class ImageDescriptionDialog(wx.Dialog):
-	"""Dialog showing an image description transcript and follow-up questions.
-
-	The transcript is rendered in a read-only multiline text control so that
-	NVDA can navigate the text line-by-line (cursor keys, word/char review).
-	Users can type follow-up questions; the Gemini multi-turn conversation
-	history (including the original image) is preserved across replies.
-	"""
+	"""Image description dialog with a read-only transcript and multi-turn follow-up input."""
 
 	def __init__(self, apiCaller, initialContents, initialUserPrompt, initialDescription):
 		super().__init__(
@@ -31,8 +25,7 @@ class ImageDescriptionDialog(wx.Dialog):
 		panel = wx.Panel(self)
 		sizer = wx.BoxSizer(wx.VERTICAL)
 
-		# Translators: Label above the read-only transcript in the image
-		# description dialog.
+		# Translators: Label above the conversation transcript.
 		transcriptLabel = wx.StaticText(panel, label=_("對話內容(&T)："))
 		sizer.Add(transcriptLabel, 0, wx.LEFT | wx.RIGHT | wx.TOP, 5)
 
@@ -43,7 +36,6 @@ class ImageDescriptionDialog(wx.Dialog):
 		)
 		sizer.Add(self._transcriptCtrl, 1, wx.EXPAND | wx.ALL, 5)
 
-		# Translators: Status line shown while waiting for a follow-up reply.
 		self._statusLabel = wx.StaticText(panel, label="")
 		sizer.Add(self._statusLabel, 0, wx.LEFT | wx.RIGHT, 5)
 
@@ -84,10 +76,7 @@ class ImageDescriptionDialog(wx.Dialog):
 		self.Bind(wx.EVT_CHAR_HOOK, self._onCharHook)
 
 		self.SetEscapeId(wx.ID_CLOSE)
-		# Put focus on the transcript so the user can cursor-navigate it,
-		# and explicitly speak the initial description once the dialog has
-		# been shown (otherwise NVDA's focus-change announcement interrupts
-		# the speech and only the opening words are heard).
+		# wx.CallAfter defers speech until after Show() so NVDA's focus announcement doesn't cut it off.
 		self._transcriptCtrl.SetInsertionPoint(0)
 		self._transcriptCtrl.SetFocus()
 		wx.CallAfter(self._speak, initialDescription)
@@ -173,9 +162,6 @@ class ImageDescriptionDialog(wx.Dialog):
 			)
 			# Translators: Transcript label for the model's follow-up reply.
 			self._appendTurn(_("回答"), answer)
-			# Put focus on the transcript so the user can cursor-navigate the
-			# new reply, and speak it explicitly since a focus change alone
-			# only reads the cursor line.
 			self._transcriptCtrl.SetInsertionPoint(
 				self._transcriptCtrl.GetLastPosition(),
 			)
