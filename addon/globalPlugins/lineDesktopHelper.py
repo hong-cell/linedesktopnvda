@@ -139,8 +139,7 @@ class LineDesktopSettingsPanel(SettingsPanel):
 			style=wx.TE_MULTILINE,
 			size=(-1, 80),
 		)
-		self._promptDefault, currentPrompt = self._loadPromptOptions()
-		self._promptText.SetValue(currentPrompt)
+		self._promptText.SetValue(self._loadCurrentPrompt())
 
 	def _loadCurrentApiKey(self):
 		try:
@@ -170,19 +169,17 @@ class LineDesktopSettingsPanel(SettingsPanel):
 			log.debug("LINE: cannot load image model options", exc_info=True)
 			return ((), "", "")
 
-	def _loadPromptOptions(self):
-		"""Return (default_prompt, currently_configured_prompt)."""
+	def _loadCurrentPrompt(self):
 		try:
 			from appModules.line import (
 				_IMAGE_DESCRIPTION_DEFAULT_PROMPT,
 				getUserImagePrompt,
 			)
 
-			current = getUserImagePrompt() or _IMAGE_DESCRIPTION_DEFAULT_PROMPT
-			return (_IMAGE_DESCRIPTION_DEFAULT_PROMPT, current)
+			return getUserImagePrompt() or _IMAGE_DESCRIPTION_DEFAULT_PROMPT
 		except Exception:
-			log.debug("LINE: cannot load image prompt options", exc_info=True)
-			return ("", "")
+			log.debug("LINE: cannot load image prompt for settings panel", exc_info=True)
+			return ""
 
 	def onSave(self):
 		# Qt accessibility env var
