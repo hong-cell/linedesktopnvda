@@ -21,6 +21,7 @@ class ImageDescriptionDialog(wx.Dialog):
 		)
 		self._transcript = ""
 		self._pending = False
+		self._closed = False
 
 		panel = wx.Panel(self)
 		sizer = wx.BoxSizer(wx.VERTICAL)
@@ -149,6 +150,8 @@ class ImageDescriptionDialog(wx.Dialog):
 		threading.Thread(target=worker, daemon=True).start()
 
 	def _onApiResult(self, question, answer, err):
+		if self._closed:
+			return
 		self._pending = False
 		self._sendBtn.Enable()
 		self._inputCtrl.Enable()
@@ -176,6 +179,7 @@ class ImageDescriptionDialog(wx.Dialog):
 
 	def _onClose(self, evt):
 		global _dlg
+		self._closed = True  # prevent in-flight wx.CallAfter callbacks from touching destroyed widgets
 		_dlg = None
 		self.Destroy()
 
