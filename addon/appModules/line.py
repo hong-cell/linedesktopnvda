@@ -4123,6 +4123,8 @@ def _copyAndReadMessage(targetElement):
 
 	def _getPositionLabel(posIdx):
 		try:
+			if posIdx < 0:
+				return "keyboard-fallback"
 			return clickState["positions"][posIdx][2]
 		except Exception:
 			return "keyboard-fallback"
