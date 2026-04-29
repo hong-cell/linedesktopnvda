@@ -8551,6 +8551,7 @@ class AppModule(appModuleHandler.AppModule):
 		editHwnd = self._findSaveDialogEdit(dialogHwnd)
 		if not editHwnd:
 			self._messageReaderPending = False
+			self._messageReaderBackgroundCache = False
 			ui.message(_("無法操作儲存對話框"))
 			return
 
