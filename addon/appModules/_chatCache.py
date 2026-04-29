@@ -130,8 +130,7 @@ def onChatRoomChanged(newName):
 		return
 	if newName != _chatRoomName:
 		log.info(
-			f"LINE chat cache: chat room changed"
-			f" ({_chatRoomName!r} -> {newName!r}); clearing cache",
+			f"LINE chat cache: chat room changed ({_chatRoomName!r} -> {newName!r}); clearing cache",
 		)
 		clearCache()
 
@@ -291,9 +290,7 @@ def lookupMessage(ocrText):
 	cursor = _lastMatchedIdx if _lastMatchedIdx is not None else 0
 
 	# Date group of the cursor position (−1 if no date seen yet)
-	cursorDateGroup = (
-		_messageDateGroups[cursor] if cursor < len(_messageDateGroups) else -1
-	)
+	cursorDateGroup = _messageDateGroups[cursor] if cursor < len(_messageDateGroups) else -1
 
 	bestScore = 0.0
 	bestIdx = -1

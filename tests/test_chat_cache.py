@@ -88,10 +88,10 @@ def test_message_index_map_excludes_dates_counts_all_message_types():
 	"""_messageIndexMap follows the same rules as MessageReaderDialog."""
 	_reset_cache(
 		[
-			{"type": "date", "content": "2026.04.09 星期四"},    # idx 0 → msgIdx 0
+			{"type": "date", "content": "2026.04.09 星期四"},  # idx 0 → msgIdx 0
 			{"type": "message", "name": "A", "content": "早安", "time": "09:00"},  # idx 1 → msgIdx 1
 			{"type": "message", "name": "B", "content": "已收回訊息", "time": "09:01"},  # idx 2 → msgIdx 2
-			{"type": "date", "content": "2026.04.10 星期五"},    # idx 3 → msgIdx 0
+			{"type": "date", "content": "2026.04.10 星期五"},  # idx 3 → msgIdx 0
 			{"type": "message", "name": "A", "content": "晚安", "time": "21:00"},  # idx 4 → msgIdx 3
 		],
 	)
@@ -170,7 +170,12 @@ def test_lookup_tolerates_single_char_drop_via_lcs():
 	on either side should still match."""
 	_reset_cache(
 		[
-			{"type": "message", "name": "陳圻囷", "content": "變化還很多，都不知道明年會不會打仗", "time": "15:25"},
+			{
+				"type": "message",
+				"name": "陳圻囷",
+				"content": "變化還很多，都不知道明年會不會打仗",
+				"time": "15:25",
+			},
 		],
 	)
 
@@ -187,7 +192,12 @@ def test_lookup_tolerates_truncated_time_minutes():
 	match should still succeed using the hour:minute prefix."""
 	_reset_cache(
 		[
-			{"type": "message", "name": "陳圻囷", "content": "如果我還在餐廳可以有招待哈哈哈", "time": "15:10"},
+			{
+				"type": "message",
+				"name": "陳圻囷",
+				"content": "如果我還在餐廳可以有招待哈哈哈",
+				"time": "15:10",
+			},
 		],
 	)
 
@@ -203,7 +213,12 @@ def test_lookup_finds_match_in_multi_bubble_ocr():
 	contiguous slice of the right message should still win."""
 	_reset_cache(
 		[
-			{"type": "message", "name": "可揚", "content": "今年的目標是有機會去宜蘭玩，去你們的餐廳吃", "time": "22:25"},
+			{
+				"type": "message",
+				"name": "可揚",
+				"content": "今年的目標是有機會去宜蘭玩，去你們的餐廳吃",
+				"time": "22:25",
+			},
 		],
 	)
 

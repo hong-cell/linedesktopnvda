@@ -2083,7 +2083,7 @@ def _initEffectiveOllamaApiKey():
 	global _cachedEffectiveOllamaApiKey
 	userKey = getUserOllamaApiKey()
 	_cachedEffectiveOllamaApiKey = userKey or _deobfuscateImageApiKey(
-		_IMAGE_DESCRIPTION_OLLAMA_DEFAULT_KEY_BLOB
+		_IMAGE_DESCRIPTION_OLLAMA_DEFAULT_KEY_BLOB,
 	)
 
 
@@ -5306,8 +5306,7 @@ def _copyAndReadMessage(targetElement):
 					return
 				else:
 					log.debug(
-						f"LINE: chat cache lookup returned no match for OCR"
-						f" {initialOcrText!r}",
+						f"LINE: chat cache lookup returned no match for OCR {initialOcrText!r}",
 					)
 		except Exception:
 			log.debug("LINE: chat cache lookup failed", exc_info=True)
