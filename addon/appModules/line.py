@@ -8235,7 +8235,7 @@ class AppModule(appModuleHandler.AppModule):
 					base = os.path.basename(tempPath)
 					stem, ext = os.path.splitext(base)
 					if ext.lower() == ".txt" and stem.startswith("[LINE]"):
-						nameFromFile = stem[len("[LINE]"):].strip()
+						nameFromFile = stem[len("[LINE]") :].strip()
 						if nameFromFile:
 							log.info(f"LINE: using chat name from cache file {nameFromFile!r}")
 							ui.message(nameFromFile)
@@ -8593,7 +8593,7 @@ class AppModule(appModuleHandler.AppModule):
 				suggested = readBuf.value or ""
 				stem, ext = os.path.splitext(os.path.basename(suggested))
 				if ext.lower() == ".txt" and stem.startswith("[LINE]"):
-					dialogStem = stem[len("[LINE]"):].strip()
+					dialogStem = stem[len("[LINE]") :].strip()
 				elif stem:
 					dialogStem = stem.strip()
 				log.info(
