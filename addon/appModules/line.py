@@ -3506,7 +3506,8 @@ def _ocrReadElementText(rawElement, appModuleRef=None, preferCallAnnouncement=Fa
 						if preferCallAnnouncement:
 							announcement = _getCallAnnouncementFromOcr(ocrText)
 						log.info(f"LINE OCR nav result: {ocrText!r}")
-						_storeChatNameFromText(ocrText)
+						if not preferCallAnnouncement:
+							_storeChatNameFromText(ocrText)
 						speech.cancelSpeech()
 						ui.message(announcement or ocrText)
 					else:
@@ -8594,8 +8595,6 @@ class AppModule(appModuleHandler.AppModule):
 				stem, ext = os.path.splitext(os.path.basename(suggested))
 				if ext.lower() == ".txt" and stem.startswith("[LINE]"):
 					dialogStem = stem[len("[LINE]") :].strip()
-				elif stem:
-					dialogStem = stem.strip()
 				log.info(
 					f"LINE: save dialog suggested filename {suggested!r}, extracted stem {dialogStem!r}",
 				)
