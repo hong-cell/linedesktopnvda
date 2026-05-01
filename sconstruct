@@ -112,8 +112,9 @@ if (cssFile := Path("style.css")).is_file():
 
 if (readmeFile := Path("readme.md")).is_file():
 	readmePath = docsDir / buildVars.baseLanguage / readmeFile
-	readmeTarget = env.Command(str(readmePath), str(readmeFile), Copy("$TARGET", "$SOURCE"))
-	env.Depends(addon, readmeTarget)
+	if not readmePath.is_file():
+		readmeTarget = env.Command(str(readmePath), str(readmeFile), Copy("$TARGET", "$SOURCE"))
+		env.Depends(addon, readmeTarget)
 
 for mdFile in env.Glob(docsDir/"*/*.md"):
 	# the title of the html file is translated based on the contents of something in the moFile for a language.

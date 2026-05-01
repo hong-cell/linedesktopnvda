@@ -21,13 +21,16 @@ addon_info = AddonInfo(
 	addon_summary=_("LINE Desktop Accessibility"),
 	# Add-on description
 	# Translators: Long description to be shown for this add-on on add-on information from add-on store
-	addon_description=_("""Enhances NVDA accessibility support for the LINE desktop application on Windows.
-Provides improved navigation for chat lists, messages, contacts, and message input."""),
+	addon_description=_("""Enhances NVDA accessibility support for LINE Desktop on Windows.
+Provides improved navigation for chat lists, messages, contacts, and message input.
+Supports calls, incoming call handling, OCR-assisted reading, message export reading, and AI image description with follow-up questions."""),
 	# version
 	addon_version="1.2.4-beta9",
 	# Brief changelog for this version
 	# Translators: what's new content for the add-on version to be shown in the add-on store
-	addon_changelog=_("""See changelog.md for details."""),
+	addon_changelog=_("""Added an AI image description dialog with a read-only transcript and follow-up questions.
+Added settings for the image description service, API key, model, and prompt.
+Completed translations and documentation for all supported languages."""),
 	# Author(s)
 	addon_author="張可揚 <lindsay714322@gmail.com>; 洪鳳恩 <kittyhong0208@gmail.com>",
 	# URL for the add-on documentation support

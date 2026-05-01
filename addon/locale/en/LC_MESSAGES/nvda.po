@@ -1,9 +1,9 @@
 msgid ""
 msgstr ""
-"Project-Id-Version: lineDesktop 1.1.2\n"
+"Project-Id-Version: lineDesktop 1.2.4-beta9\n"
 "Report-Msgid-Bugs-To: nvda-translations@groups.io\n"
-"POT-Creation-Date: 2024-01-01 00:00+0000\n"
-"PO-Revision-Date: 2026-03-07 22:55+0800\n"
+"POT-Creation-Date: 2026-05-01 00:00+0800\n"
+"PO-Revision-Date: 2026-05-01 00:00+0800\n"
 "Last-Translator: 張可揚 <lindsay714322@gmail.com>\n"
 "Language-Team: English <lindsay714322@gmail.com>\n"
 "Language: en\n"
@@ -12,91 +12,836 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
 
-#. Translators: Summary/title for this add-on
-#. to be shown on installation and add-on information found in add-on store
-msgid "LINE Desktop Accessibility"
-msgstr "LINE Desktop Accessibility"
+#: addon\appModules\line.py:602
+msgid "確認要收回嗎？按 Y 收回，按 N 取消"
+msgstr "Confirm recall? Press Y to recall, N to cancel"
 
-#. Translators: Long description to be shown for this add-on on add-on information from add-on store
-msgid ""
-"Enhances NVDA accessibility support for the LINE desktop application on "
-"Windows.\n"
-"Provides improved navigation for chat lists, messages, contacts, and message "
-"input.\n"
-"Supports voice and video calls, incoming call handling, microphone and "
-"camera status announcements, and OCR-assisted text reading."
+#: addon\appModules\line.py:654
+msgid "轉為文字會將照片上傳到 LINE 伺服器處理。按 A 同意，按 D 不同意"
 msgstr ""
-"Enhances NVDA accessibility support for the LINE desktop application on "
-"Windows.\n"
-"Provides improved navigation for chat lists, messages, contacts, and message "
-"input.\n"
-"Supports voice and video calls, incoming call handling, microphone and "
-"camera status announcements, and OCR-assisted text reading."
+"Converting to text uploads the photo to LINE servers for processing. Press A to agree, D to decline"
 
-#. Translators: what's new content for the add-on version to be shown in the add-on store
-msgid ""
-"Improved video call handling and incoming call detection.\n"
-"Added microphone and camera status announcements during calls.\n"
-"Added Focus Call Window shortcut (NVDA+Windows+F).\n"
-"Improved message copy-read reliability."
+#: addon\appModules\line.py:601
+msgid "確認要收回嗎？按 Y 收回，按 N 取消，按 P 無痕收回，需要 Premium"
 msgstr ""
-"Improved video call handling and incoming call detection.\n"
-"Added microphone and camera status announcements during calls.\n"
-"Added Focus Call Window shortcut (NVDA+Windows+F).\n"
-"Improved message copy-read reliability."
+"Confirm recall? Press Y to recall, N to cancel, P for stealth recall (Premium required)"
 
-#. Translators: Label for the email input field on the LINE login screen
-msgid "Email"
-msgstr "Email"
+#: addon\appModules\line.py:2567
+#: addon\appModules\line.py:2547
+#: addon\appModules\line.py:2650
+#. plus 2 more location(s)
+msgid "圖片描述失敗"
+msgstr "Image description failed"
 
-#. Translators: Label for the password input field on the LINE login screen
-msgid "Password"
-msgstr "Password"
+#: addon\appModules\line.py:2664
+#: addon\appModules\line.py:2555
+msgid "圖片描述失敗 (無回應)"
+msgstr "Image description failed (no response)"
 
-#. Translators: Generic label for a login field when position cannot be determined
+#: addon\appModules\line.py:5513
+#: addon\appModules\line.py:4152
+#: addon\appModules\line.py:4138
 msgid "Login field"
 msgstr "Login field"
 
-#. Translators: Label for the LINE message input field
-msgid "Message input"
-msgstr "Message input"
-
-#. Translators: Label for the search chat rooms field in LINE
-msgid "Search chat rooms"
-msgstr "Search chat rooms"
-
-#. Translators: Label for the search notes content field in LINE
-msgid "Search notes content"
-msgstr "Search notes content"
-
-#. Translators: Tab name announced when pressing Control+1 in LINE
+#: addon\appModules\line.py:8925
 msgid "Friends"
 msgstr "Friends"
 
-#. Translators: Tab name announced when pressing Control+2 in LINE
+#: addon\appModules\line.py:8926
 msgid "Chats"
 msgstr "Chats"
 
-#. Translators: Tab name announced when pressing Control+3 in LINE
+#: addon\appModules\line.py:8927
 msgid "Add friends"
 msgstr "Add friends"
 
-#. Translators: Menu item for navigating to All chats tab
+#: addon\appModules\line.py:2673
+msgid "無法取得圖片資料"
+msgstr "Unable to get image data"
+
+#: addon\appModules\line.py:4190
+#: addon\appModules\line.py:4217
+#: addon\appModules\line.py:5461
+#. plus 2 more location(s)
+msgid "Message input"
+msgstr "Message input"
+
+#: addon\appModules\line.py:4214
+#: addon\appModules\line.py:5479
+#: addon\appModules\line.py:3998
+msgid "Search chat rooms"
+msgstr "Search chat rooms"
+
+#: addon\appModules\line.py:6019
+msgid "Debug: log UIA tree info for the focused element"
+msgstr "Debug: log UIA tree info for the focused element"
+
+#: addon\appModules\line.py:7642
+#: addon\appModules\line.py:7589
+msgid "已接聽"
+msgstr "Answered"
+
+#: addon\appModules\line.py:7763
+#: addon\appModules\line.py:7711
+msgid "已拒絕"
+msgstr "Rejected"
+
+#: addon\appModules\line.py:7873
+msgid "撥打語音通話"
+msgstr "Make a voice call"
+
+#: addon\appModules\line.py:7888
+msgid "撥打視訊通話"
+msgstr "Make a video call"
+
+#: addon\appModules\line.py:7903
+#: addon\globalPlugins\lineDesktopHelper.py:1139
+msgid "LINE: 點擊更多選項按鈕"
+msgstr "LINE: click More options button"
+
+#: addon\appModules\line.py:8322
+msgid "讀出目前聊天室名稱"
+msgstr "Read current chat room name"
+
+#: addon\appModules\line.py:8357
+msgid "主視窗（含側邊欄）"
+msgstr "Main window (with sidebar)"
+
+#: addon\appModules\line.py:8358
+msgid "獨立聊天視窗"
+msgstr "Separate chat window"
+
+#: addon\appModules\line.py:8359
+msgid "未知視窗"
+msgstr "Unknown window"
+
+#: addon\appModules\line.py:8339
+msgid "報告 LINE 版本與視窗類型"
+msgstr "Report LINE version and window type"
+
+#: addon\appModules\line.py:8468
+msgid "正在開啟訊息閱讀器…"
+msgstr "Opening message reader..."
+
+#: addon\appModules\line.py:8494
+msgid "正在儲存聊天到背景…"
+msgstr "Saving chat to background..."
+
+#: addon\appModules\line.py:9812
+msgid "Reply to the current message"
+msgstr "Reply to the current message"
+
+#: addon\appModules\line.py:9821
+msgid "Copy the current message"
+msgstr "Copy the current message"
+
+#: addon\appModules\line.py:9851
+msgid "Save the current message as a file"
+msgstr "Save the current message as a file"
+
+#: addon\appModules\line.py:9910
+msgid "描述圖片中，請稍候"
+msgstr "Describing image, please wait"
+
+#: addon\appModules\line.py:9867
+msgid "使用設定的 AI 服務描述目前的圖片訊息"
+msgstr "Describe the current image message with the configured AI service"
+
+#: addon\appModules\line.py:10085
+msgid "找不到語音訊息的播放按鈕"
+msgstr "Voice message play button not found"
+
+#: addon\appModules\line.py:10031
+msgid "Play the current voice message"
+msgstr "Play the current voice message"
+
+#: addon\appModules\line.py:10089
+msgid "Recall (unsend) the current message"
+msgstr "Recall (unsend) the current message"
+
+#: addon\appModules\line.py:11038
+msgid "找不到不同意按鈕"
+msgstr "Decline button not found"
+
+#: addon\appModules\line.py:11089
+msgid "Open message context menu"
+msgstr "Open message context menu"
+
+#: addon\appModules\line.py:2517
+#: addon\appModules\line.py:2615
+msgid "未設定 API Key"
+msgstr "API key is not set"
+
+#: addon\appModules\line.py:3829
+#: addon\appModules\line.py:3939
+#: addon\appModules\line.py:3841
+#. plus 3 more location(s)
+msgid "List item"
+msgstr "List item"
+
+#: addon\appModules\line.py:4151
+#: addon\appModules\line.py:5543
+#: addon\appModules\line.py:5583
+msgid "Password"
+msgstr "Password"
+
+#: addon\appModules\line.py:4213
+msgid "Search notes content"
+msgstr "Search notes content"
+
+#: addon\appModules\line.py:7794
+msgid "無法辨識來電者"
+msgstr "Unable to identify caller"
+
+#: addon\appModules\line.py:7844
+#: addon\globalPlugins\lineDesktopHelper.py:935
+msgid "未偵測到通話視窗"
+msgstr "Call window not detected"
+
+#: addon\appModules\line.py:8250
+msgid "找不到 LINE 視窗"
+msgstr "LINE window not found"
+
+#: addon\appModules\line.py:8297
+msgid "無法取得聊天室標題區域"
+msgstr "Unable to get chat room title area"
+
+#: addon\appModules\line.py:8351
+msgid "LINE 版本: 未知"
+msgstr "LINE version: unknown"
+
+#: addon\appModules\line.py:8369
+msgid "Qt 無障礙: 已啟用"
+msgstr "Qt accessibility: enabled"
+
+#: addon\appModules\line.py:8369
+msgid "Qt 無障礙: 未啟用"
+msgstr "Qt accessibility: disabled"
+
+#: addon\appModules\line.py:8466
+#: addon\appModules\line.py:8492
+msgid "訊息閱讀器正在執行中，請稍候"
+msgstr "Message reader is running, please wait"
+
+#: addon\appModules\line.py:8538
+#: addon\appModules\line.py:8523
+msgid "找不到儲存聊天選項"
+msgstr "Save chat option not found"
+
+#: addon\appModules\line.py:8580
+msgid "無法操作儲存對話框"
+msgstr "Unable to operate the save dialog"
+
+#: addon\appModules\line.py:8794
+msgid "找不到儲存的聊天紀錄檔案"
+msgstr "Saved chat history file not found"
+
+#: addon\appModules\line.py:9902
+#: addon\appModules\line.py:9109
+#: addon\appModules\line.py:9119
+#. plus 6 more location(s)
+msgid "找不到目前的訊息"
+msgstr "Current message not found"
+
+#: addon\appModules\line.py:9907
+msgid "擷取圖片失敗"
+msgstr "Image capture failed"
+
+#: addon\appModules\line.py:10601
+msgid "找不到收回按鈕"
+msgstr "Recall button not found"
+
+#: addon\appModules\line.py:10605
+msgid "找不到無痕收回按鈕，需要 Premium"
+msgstr "Stealth recall button not found; Premium is required"
+
+#: addon\appModules\line.py:11035
+msgid "找不到同意按鈕"
+msgstr "Agree button not found"
+
+#: addon\appModules\line.py:2540
+#: addon\appModules\line.py:2643
+msgid "圖片描述失敗 (網路錯誤)"
+msgstr "Image description failed (network error)"
+
+#: addon\appModules\line.py:4150
+#: addon\appModules\line.py:5532
+#: addon\appModules\line.py:5580
+msgid "Email"
+msgstr "Email"
+
+#: addon\appModules\line.py:6732
+msgid "視訊通話確認"
+msgstr "Video call confirmation"
+
+#: addon\appModules\line.py:6735
+msgid "已開始視訊通話"
+msgstr "Started video call"
+
+#: addon\appModules\line.py:7808
+#: addon\appModules\line.py:7820
+#: addon\appModules\line.py:7832
+#. plus 6 more location(s)
+msgid "未偵測到來電"
+msgstr "No incoming call detected"
+
+#: addon\appModules\line.py:7881
+#: addon\appModules\line.py:7896
+#: addon\appModules\line.py:7911
+#. plus 5 more location(s)
+msgid "找不到 LINE 視窗，請先開啟聊天室"
+msgstr "LINE window not found. Please open a chat room first."
+
+#: addon\appModules\line.py:8315
+msgid "無法讀取聊天室名稱"
+msgstr "Unable to read chat room name"
+
+#: addon\appModules\line.py:8363
+msgid "視窗類型: {type}"
+msgstr "Window type: {type}"
+
+#: addon\appModules\line.py:8380
+msgid "已移除 QT_ACCESSIBILITY 環境變數，重啟 LINE 後生效"
+msgstr "Removed the QT_ACCESSIBILITY environment variable. Restart LINE to apply."
+
+#: addon\appModules\line.py:8382
+msgid "移除 QT_ACCESSIBILITY 環境變數失敗"
+msgstr "Failed to remove QT_ACCESSIBILITY environment variable"
+
+#: addon\appModules\line.py:8385
+msgid "已設定 QT_ACCESSIBILITY=1，重啟 LINE 後生效"
+msgstr "Set QT_ACCESSIBILITY=1. Restart LINE to apply."
+
+#: addon\appModules\line.py:8387
+msgid "設定 QT_ACCESSIBILITY 環境變數失敗"
+msgstr "Failed to set QT_ACCESSIBILITY environment variable"
+
+#: addon\appModules\line.py:8481
+msgid "訊息閱讀器功能錯誤"
+msgstr "Message reader error"
+
+#: addon\appModules\line.py:8507
+msgid "背景快取功能錯誤"
+msgstr "Background cache error"
+
+#: addon\appModules\line.py:8571
+msgid "未偵測到儲存對話框"
+msgstr "Save dialog not detected"
+
+#: addon\appModules\line.py:8804
+msgid "聊天紀錄中沒有訊息"
+msgstr "No messages in chat history"
+
+#: addon\appModules\line.py:8823
+msgid "聊天已快取到背景，瀏覽訊息時將直接讀取（離開聊天室後清除）"
+msgstr ""
+"Chat cached in the background. Messages will be read directly while browsing (cleared after leaving the chat room)."
+
+#: addon\appModules\line.py:10628
+msgid "已無痕收回"
+msgstr "Stealth recall completed"
+
+#: addon\appModules\line.py:11057
+msgid "已同意提供照片"
+msgstr "Photo upload accepted"
+
+#: addon\appModules\line.py:11059
+msgid "已不同意提供照片"
+msgstr "Photo upload declined"
+
+#: addon\appModules\line.py:11245
+#: addon\appModules\line.py:11281
+msgid "找不到訊息選單"
+msgstr "Message menu not found"
+
+#: addon\appModules\line.py:5080
+msgid "貼圖，請按 NVDA+Windows+I 描述"
+msgstr "Sticker. Press NVDA+Windows+I to describe."
+
+#: addon\appModules\line.py:6741
+#: addon\appModules\line.py:6935
+msgid "無法點擊開始按鈕"
+msgstr "Unable to click the Start button"
+
+#: addon\appModules\line.py:6927
+msgid "已開始群組語音通話"
+msgstr "Started group voice call"
+
+#: addon\appModules\line.py:6929
+msgid "已開始語音通話"
+msgstr "Started voice call"
+
+#: addon\appModules\line.py:7862
+#: addon\globalPlugins\lineDesktopHelper.py:950
+msgid "通話視窗（無法辨識內容）"
+msgstr "Call window (content could not be recognized)"
+
+#: addon\appModules\line.py:7865
+#: addon\globalPlugins\lineDesktopHelper.py:953
+msgid "通話視窗"
+msgstr "Call window"
+
+#: addon\appModules\line.py:8349
+msgid "LINE 版本: {version}"
+msgstr "LINE version: {version}"
+
+#: addon\appModules\line.py:8354
+msgid "語言: {language}"
+msgstr "Language: {language}"
+
+#: addon\appModules\line.py:8837
+msgid "背景快取開啟錯誤"
+msgstr "Background cache open error"
+
+#: addon\appModules\line.py:8837
+msgid "訊息閱讀器開啟錯誤"
+msgstr "Message reader open error"
+
+#: addon\appModules\line.py:10620
+msgid "無痕收回可能未成功"
+msgstr "Stealth recall may not have succeeded"
+
+#: addon\appModules\line.py:10630
+msgid "已收回"
+msgstr "Recalled"
+
+#: addon\appModules\line.py:10632
+msgid "已取消"
+msgstr "Cancelled"
+
+#: addon\appModules\line.py:11051
+msgid "同意提供照片可能未成功"
+msgstr "Agreeing to photo upload may not have succeeded"
+
+#: addon\appModules\line.py:11053
+msgid "不同意提供照片可能未成功"
+msgstr "Declining photo upload may not have succeeded"
+
+#: addon\appModules\line.py:2537
+#: addon\appModules\line.py:2640
+msgid "圖片描述失敗 (HTTP {code})"
+msgstr "Image description failed (HTTP {code})"
+
+#: addon\appModules\line.py:5090
+#: addon\appModules\line.py:5122
+msgid "圖片，請按 NVDA+Windows+K 下載。"
+msgstr "Image. Press NVDA+Windows+K to download."
+
+#: addon\appModules\line.py:7789
+msgid "來電：{callerName}"
+msgstr "Incoming call: {callerName}"
+
+#: addon\appModules\line.py:7791
+msgid "來電（OCR: {ocrText}）"
+msgstr "Incoming call (OCR: {ocrText})"
+
+#: addon\appModules\line.py:7811
+#: addon\globalPlugins\lineDesktopHelper.py:875
+#: addon\globalPlugins\lineDesktopHelper.py:1013
+msgid "接聽功能錯誤: {error}"
+msgstr "Answer call error: {error}"
+
+#: addon\appModules\line.py:7823
+#: addon\globalPlugins\lineDesktopHelper.py:895
+#: addon\globalPlugins\lineDesktopHelper.py:1036
+msgid "拒絕功能錯誤: {error}"
+msgstr "Reject call error: {error}"
+
+#: addon\appModules\line.py:7835
+#: addon\globalPlugins\lineDesktopHelper.py:915
+#: addon\globalPlugins\lineDesktopHelper.py:1059
+msgid "來電查看功能錯誤: {error}"
+msgstr "Caller check error: {error}"
+
+#: addon\appModules\line.py:7884
+#: addon\globalPlugins\lineDesktopHelper.py:773
+msgid "通話功能錯誤: {error}"
+msgstr "Call error: {error}"
+
+#: addon\appModules\line.py:7899
+#: addon\globalPlugins\lineDesktopHelper.py:790
+msgid "視訊通話功能錯誤: {error}"
+msgstr "Video call error: {error}"
+
+#: addon\appModules\line.py:7918
+#: addon\globalPlugins\lineDesktopHelper.py:823
+#: addon\globalPlugins\lineDesktopHelper.py:1154
+msgid "更多選項功能錯誤: {error}"
+msgstr "More options error: {error}"
+
+#: addon\appModules\line.py:8318
+#: addon\appModules\line.py:8335
+#: addon\globalPlugins\lineDesktopHelper.py:839
+#. plus 1 more location(s)
+msgid "讀取聊天室名稱錯誤: {error}"
+msgstr "Read chat room name error: {error}"
+
+#: addon\appModules\line.py:9278
+msgid "找不到「{actionName}」選項"
+msgstr "Could not find the \"{actionName}\" option"
+
+#: addon\appModules\line.py:10078
+#: addon\appModules\line.py:10073
+msgid "播放"
+msgstr "Play"
+
+#: addon\appModules\line.py:10622
+msgid "收回可能未成功"
+msgstr "Recall may not have succeeded"
+
+#: addon\appModules\line.py:10624
+msgid "取消可能未成功"
+msgstr "Cancel may not have succeeded"
+
+#: addon\appModules\line.py:6876
+msgid "語音通話確認"
+msgstr "Voice call confirmation"
+
+#: addon\appModules\line.py:9262
+msgid "複製"
+msgstr "Copy"
+
+#: addon\appModules\line.py:5105
+msgid "檔案，{deadline}。請按 NVDA+Windows+K 下載。"
+msgstr "File, {deadline}. Press NVDA+Windows+K to download."
+
+#: addon\appModules\_imageDescriptionDialog.py:135
+msgid "回答中，請稍候…"
+msgstr "Answering, please wait..."
+
+#: addon\appModules\_imageDescriptionDialog.py:61
+#: addon\appModules\_messageReader.py:46
+msgid "關閉(&C)"
+msgstr "Close(&C)"
+
+#: addon\appModules\_imageDescriptionDialog.py:70
+msgid "提示"
+msgstr "Prompt"
+
+#: addon\appModules\_imageDescriptionDialog.py:72
+msgid "描述"
+msgstr "Description"
+
+#: addon\appModules\_imageDescriptionDialog.py:126
+msgid "提問"
+msgstr "Question"
+
+#: addon\appModules\_imageDescriptionDialog.py:14
+msgid "圖片描述"
+msgstr "Image Description"
+
+#: addon\appModules\_imageDescriptionDialog.py:30
+msgid "對話內容(&T)："
+msgstr "Transcript (&T):"
+
+#: addon\appModules\_imageDescriptionDialog.py:46
+msgid "後續提問(&Q)（按 Ctrl+Enter 送出）："
+msgstr "Follow-up question (&Q) (press Ctrl+Enter to send):"
+
+#: addon\appModules\_imageDescriptionDialog.py:59
+msgid "送出(&S)"
+msgstr "Send(&S)"
+
+#: addon\appModules\_imageDescriptionDialog.py:167
+msgid "回答"
+msgstr "Answer"
+
+#: addon\appModules\_imageDescriptionDialog.py:174
+msgid "回答失敗"
+msgstr "Answer failed"
+
+#: addon\appModules\_imageDescriptionDialog.py:176
+msgid "錯誤"
+msgstr "Error"
+
+#: addon\appModules\_messageReader.py:16
+msgid "訊息閱讀器"
+msgstr "Message Reader"
+
+#: addon\appModules\_messageReader.py:79
+msgid "沒有訊息"
+msgstr "No messages"
+
+#: addon\appModules\_messageReader.py:120
+msgid "已經是第一項"
+msgstr "Already at the first item"
+
+#: addon\appModules\_messageReader.py:129
+msgid "已經是最後一項"
+msgstr "Already at the last item"
+
+#: addon\globalPlugins\lineDesktopHelper.py:101
+msgid "LINE Desktop"
+msgstr "LINE Desktop"
+
+#: addon\globalPlugins\lineDesktopHelper.py:107
+msgid "啟用 Qt 無障礙環境變數 QT_ACCESSIBILITY=1 (&Q)"
+msgstr "Enable Qt accessibility environment variable QT_ACCESSIBILITY=1 (&Q)"
+
+#: addon\globalPlugins\lineDesktopHelper.py:115
+msgid "圖片描述服務 (&D)"
+msgstr "Image description service (&D)"
+
+#: addon\globalPlugins\lineDesktopHelper.py:135
+msgid "圖片描述 API Key，留空則使用預設金鑰 (&I)"
+msgstr "Image description API key; leave blank to use the default key (&I)"
+
+#: addon\globalPlugins\lineDesktopHelper.py:139
+msgid "圖片描述模型 (&M)"
+msgstr "Image description model (&M)"
+
+#: addon\globalPlugins\lineDesktopHelper.py:147
+msgid "圖片描述提示詞，留空則使用預設 (&P)"
+msgstr "Image description prompt; leave blank to use the default (&P)"
+
+#: addon\globalPlugins\lineDesktopHelper.py:972
+msgid "Debug: Report focused object's appModule and executable"
+msgstr "Debug: Report focused object's appModule and executable"
+
+#: addon\globalPlugins\lineDesktopHelper.py:994
+msgid "LINE: 接聽來電"
+msgstr "LINE: answer incoming call"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1017
+msgid "LINE: 拒絕來電"
+msgstr "LINE: reject incoming call"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1040
+msgid "LINE: 查看來電者"
+msgstr "LINE: check caller"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1063
+msgid "LINE: 跳到通話視窗"
+msgstr "LINE: focus call window"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1082
+msgid "LINE: 讀出目前聊天室名稱"
+msgstr "LINE: read current chat room name"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1101
+msgid "LINE: 開啟訊息閱讀器"
+msgstr "LINE: open message reader"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1120
+msgid "LINE: 將聊天快取到背景供訊息列表直接讀取"
+msgstr "LINE: cache chat in the background for direct message-list reading"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1160
+msgid "LINE: 跳到全部聊天室"
+msgstr "LINE: go to All Chats"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1186
+msgid "LINE: 跳到好友"
+msgstr "LINE: go to Friends"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1211
+msgid "LINE: 跳到群組"
+msgstr "LINE: go to Groups"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1236
+msgid "LINE: 跳到社群"
+msgstr "LINE: go to Communities"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1261
+msgid "LINE: 跳到官方帳號"
+msgstr "LINE: go to Official Accounts"
+
+#: addon\globalPlugins\lineDesktopHelper.py:743
+#: addon\globalPlugins\lineDesktopHelper.py:766
+#: addon\globalPlugins\lineDesktopHelper.py:783
+#. plus 21 more location(s)
+msgid "LINE 未執行"
+msgstr "LINE is not running"
+
+#: addon\globalPlugins\lineDesktopHelper.py:320
+msgid "設定 Qt 無障礙環境變數失敗，請確認系統權限。"
+msgstr ""
+"Failed to set the Qt accessibility environment variable. Please check system permissions."
+
+#: addon\globalPlugins\lineDesktopHelper.py:322
+#: addon\globalPlugins\lineDesktopHelper.py:390
+#: addon\globalPlugins\lineDesktopHelper.py:346
+#. plus 3 more location(s)
+msgid "LINE Desktop - 設定錯誤"
+msgstr "LINE Desktop - Settings Error"
+
+#: addon\globalPlugins\lineDesktopHelper.py:389
+msgid "無法載入 API Key 設定，請確認附加元件完整性。"
+msgstr "Unable to load API key settings. Please verify add-on integrity."
+
+#: addon\globalPlugins\lineDesktopHelper.py:534
 msgid "全部聊天室(&1)"
 msgstr "All Chats(&1)"
 
-#. Translators: Menu item for navigating to Friends tab
+#: addon\globalPlugins\lineDesktopHelper.py:539
 msgid "好友(&2)"
 msgstr "Friends(&2)"
 
-#. Translators: Menu item for navigating to Groups tab
+#: addon\globalPlugins\lineDesktopHelper.py:544
 msgid "群組(&3)"
 msgstr "Groups(&3)"
 
-#. Translators: Menu item for navigating to Communities tab
+#: addon\globalPlugins\lineDesktopHelper.py:549
 msgid "社群(&4)"
 msgstr "Communities(&4)"
 
-#. Translators: Menu item for navigating to Official accounts tab
+#: addon\globalPlugins\lineDesktopHelper.py:554
 msgid "官方帳號(&5)"
 msgstr "Official Accounts(&5)"
+
+#: addon\globalPlugins\lineDesktopHelper.py:563
+msgid "語音通話(&C)"
+msgstr "Voice Call(&C)"
+
+#: addon\globalPlugins\lineDesktopHelper.py:568
+msgid "視訊通話(&V)"
+msgstr "Video Call(&V)"
+
+#: addon\globalPlugins\lineDesktopHelper.py:573
+msgid "更多選項(&O)"
+msgstr "More Options(&O)"
+
+#: addon\globalPlugins\lineDesktopHelper.py:578
+msgid "訊息閱讀器(&J)"
+msgstr "Message Reader(&J)"
+
+#: addon\globalPlugins\lineDesktopHelper.py:583
+msgid "讀出聊天室名稱(&T)"
+msgstr "Read Chat Room Name(&T)"
+
+#: addon\globalPlugins\lineDesktopHelper.py:588
+msgid "圖片描述(&I)"
+msgstr "Image Description(&I)"
+
+#: addon\globalPlugins\lineDesktopHelper.py:597
+msgid "接聽來電(&A)"
+msgstr "Answer Call(&A)"
+
+#: addon\globalPlugins\lineDesktopHelper.py:602
+msgid "拒絕來電(&D)"
+msgstr "Reject Call(&D)"
+
+#: addon\globalPlugins\lineDesktopHelper.py:607
+msgid "查看來電者(&S)"
+msgstr "Check Caller(&S)"
+
+#: addon\globalPlugins\lineDesktopHelper.py:612
+msgid "跳到通話視窗(&F)"
+msgstr "Focus Call Window(&F)"
+
+#: addon\globalPlugins\lineDesktopHelper.py:752
+#: addon\globalPlugins\lineDesktopHelper.py:1179
+#: addon\globalPlugins\lineDesktopHelper.py:1204
+#. plus 3 more location(s)
+msgid "此功能需要更新 LINE 模組"
+msgstr "This feature requires an updated LINE module"
+
+#: addon\globalPlugins\lineDesktopHelper.py:345
+msgid "儲存圖片描述服務失敗，請重試。"
+msgstr "Failed to save the image description service. Please try again."
+
+#: addon\globalPlugins\lineDesktopHelper.py:445
+msgid "儲存圖片描述提示詞失敗，請重試。"
+msgstr "Failed to save the image description prompt. Please try again."
+
+#: addon\globalPlugins\lineDesktopHelper.py:1174
+msgid "全部"
+msgstr "All"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1177
+msgid "無法切換到全部"
+msgstr "Unable to switch to All"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1200
+msgid "好友"
+msgstr "Friends"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1202
+msgid "無法切換到好友"
+msgstr "Unable to switch to Friends"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1225
+msgid "群組"
+msgstr "Groups"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1227
+msgid "無法切換到群組"
+msgstr "Unable to switch to Groups"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1250
+msgid "社群"
+msgstr "Communities"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1252
+msgid "無法切換到社群"
+msgstr "Unable to switch to Communities"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1275
+msgid "官方帳號"
+msgstr "Official Accounts"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1277
+msgid "無法切換到官方帳號"
+msgstr "Unable to switch to Official Accounts"
+
+#: addon\globalPlugins\lineDesktopHelper.py:377
+msgid "儲存圖片描述 API Key 失敗，請重試。"
+msgstr "Failed to save the image description API key. Please try again."
+
+#: addon\globalPlugins\lineDesktopHelper.py:420
+msgid "儲存圖片描述模型失敗，請重試。"
+msgstr "Failed to save the image description model. Please try again."
+
+#: addon\globalPlugins\lineDesktopHelper.py:755
+#: addon\globalPlugins\lineDesktopHelper.py:1182
+#: addon\globalPlugins\lineDesktopHelper.py:1207
+#. plus 3 more location(s)
+msgid "切換分頁錯誤: {error}"
+msgstr "Tab switching error: {error}"
+
+#: addon\globalPlugins\lineDesktopHelper.py:806
+#: addon\globalPlugins\lineDesktopHelper.py:1116
+msgid "訊息閱讀器功能錯誤: {error}"
+msgstr "Message reader error: {error}"
+
+#: addon\globalPlugins\lineDesktopHelper.py:855
+msgid "圖片描述功能錯誤: {error}"
+msgstr "Image description error: {error}"
+
+#: addon\globalPlugins\lineDesktopHelper.py:958
+#: addon\globalPlugins\lineDesktopHelper.py:1078
+msgid "跳到通話視窗功能錯誤: {error}"
+msgstr "Focus call window error: {error}"
+
+#: addon\globalPlugins\lineDesktopHelper.py:1135
+msgid "背景快取功能錯誤: {error}"
+msgstr "Background cache error: {error}"
+
+#: addon\globalPlugins\lineDesktopHelper.py:750
+msgid "無法切換到{tabName}"
+msgstr "Unable to switch to {tabName}"
+
+#: buildVars.py:21
+msgid "LINE Desktop Accessibility"
+msgstr "LINE Desktop Accessibility"
+
+#: buildVars.py:24
+msgid ""
+"Enhances NVDA accessibility support for LINE Desktop on Windows.\n"
+"Provides improved navigation for chat lists, messages, contacts, and message input.\n"
+"Supports calls, incoming call handling, OCR-assisted reading, message export reading, and AI image description with follow-up questions."
+msgstr ""
+"Enhances NVDA accessibility support for LINE Desktop on Windows.\n"
+"Provides improved navigation for chat lists, messages, contacts, and message input.\n"
+"Supports calls, incoming call handling, OCR-assisted reading, message export reading, and AI image description with follow-up questions."
+
+#: buildVars.py:31
+msgid ""
+"Added an AI image description dialog with a read-only transcript and follow-up questions.\n"
+"Added settings for the image description service, API key, model, and prompt.\n"
+"Completed translations and documentation for all supported languages."
+msgstr ""
+"Added an AI image description dialog with a read-only transcript and follow-up questions.\n"
+"Added settings for the image description service, API key, model, and prompt.\n"
+"Completed translations and documentation for all supported languages."

@@ -2,7 +2,7 @@
 
 ## Overview
 
-This add-on enhances the NVDA screen reader's support for the LINE Desktop application on Windows (Qt6 version). It uses OCR (Optical Character Recognition) and coordinate-based automation to improve the accessibility of chat list navigation, message reading, and making phone calls.
+This add-on enhances the NVDA screen reader's support for the LINE Desktop application on Windows (Qt6 version). It uses OCR (Optical Character Recognition), coordinate-based automation, and optional AI image description to improve chat list navigation, message reading, image understanding, and call handling.
 
 > [!IMPORTANT]
 > Some features in this add-on rely on OCR (Optical Character Recognition), so the recognition results may not be 100% accurate.
@@ -15,6 +15,7 @@ This add-on enhances the NVDA screen reader's support for the LINE Desktop appli
 * **OCR Support**: Automatically attempts to read text that cannot be accessed through standard accessibility APIs.
 * **Debug Tools**: Provides shortcuts to inspect the UI structure, making troubleshooting easier.
 * **Accessible Message Reader**: Export the current chat and browse it in a simple reader dialog.
+* **AI Image Description**: Describe the focused image or sticker message with a configurable AI service, then ask follow-up questions in an accessible dialog.
 * **Context-Sensitive Confirmation Keys**: Temporarily provides single-key actions for recall and "Convert to text" consent dialogs.
 * **Status Feedback**: Announces tab changes plus microphone/camera state, and plays a short sound after a message is actually sent.
 
@@ -30,6 +31,10 @@ This add-on enhances the NVDA screen reader's support for the LINE Desktop appli
     1. Press `Control+1` to switch to the friends tab.
     2. Search for the friend's name, select them, and open the chat room.
     3. Press `NVDA+Windows+C` to make a voice call, or `NVDA+Windows+V` to make a video call.
+* **Describing Images**:
+    1. Move focus to an image or sticker message.
+    2. Press `NVDA+Windows+I`.
+    3. Read the result in the Image Description dialog, or type a follow-up question and press `Ctrl+Enter`.
 * **Pre-check**: Before sending a message or making a call, always check the chat history to ensure you are contacting the right person.
 
 ### Sound Effects
@@ -54,6 +59,13 @@ This add-on enhances the NVDA screen reader's support for the LINE Desktop appli
 * **Message Context Menu (`Applications` / `Shift+F10`)**: In the message list, this opens a virtual context menu for the focused message, making actions such as copy, reply, recall, and "Convert to text" easier to use.
 * **Recall Confirmation Keys**: After you choose recall, the add-on temporarily binds `Y` = Recall, `N` = Cancel, and `P` = Stealth recall (Premium required). If you do nothing for 10 seconds, the add-on cancels the action automatically.
 * **Photo-to-Text Consent Keys**: When LINE shows the first-run "Convert to text" photo upload notice, the add-on temporarily binds `A` = Agree and `D` = Decline. If you do nothing for 10 seconds, the add-on declines automatically.
+
+## AI Image Description
+
+* **Shortcut (`NVDA+Windows+I`)**: Captures the focused image or sticker message and sends it to the configured image-description service.
+* **Dialog**: The first description opens in a resizable dialog with a read-only transcript. Use the edit field to ask follow-up questions about the same image; press `Ctrl+Enter` to send.
+* **Settings**: Open "NVDA Menu -> Preferences -> Settings -> LINE Desktop" to choose the image-description service, API key, model, and prompt. Leaving the API key or prompt blank uses the configured default.
+* **Privacy Reminder**: Image description sends the captured message image to the selected AI service. Use a provider and prompt appropriate for the content you are describing.
 
 ## Virtual Windows
 
@@ -113,6 +125,7 @@ This add-on currently provides the following virtual windows:
 | **NVDA+Windows+Delete** | Add-on | Recall (unsend) the current message |
 | **NVDA+Windows+T** | Add-on | Read current chat room name |
 | **NVDA+Windows+K** | Add-on | Open Save As dialog (Files can only be downloaded for 7 days after upload) |
+| **NVDA+Windows+I** | Add-on | Describe the current image or sticker message with the configured AI service |
 | **Applications / Shift+F10** | Add-on | Open the virtual context menu for the current message |
 
 ### Temporary Confirmation Keys
@@ -223,11 +236,11 @@ This add-on currently provides the following virtual windows:
 
 * **LINE User Group**: [Join Group](https://line.me/R/ti/g/BKQ2dZtTjx)
   Feel free to join the group to suggest features, report issues, or discuss with the development team.
-* **Source Code & Issue Tracker**: [GitHub Repository](https://github.com/hong-cell/linedesktopnvda)
+* **Source Code & Issue Tracker**: [GitHub Repository](https://github.com/keyang556/linedesktopnvda)
   If you have feature suggestions or find bugs, feel free to open an Issue; if you are willing to contribute code, Pull Requests are entirely welcome.
 * **Contact Developer**: [Contact Ken Chang (LINE)](https://line.me/ti/p/3GigC88lAt)
 
 ## Supported Versions
 
 * LINE Desktop for Windows (Standard installer or Microsoft Store version).
-* NVDA 2022.1 or higher.
+* NVDA 2019.3 or higher.

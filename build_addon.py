@@ -17,12 +17,15 @@ OUTPUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), OUTPUT_NA
 MANIFEST_CONTENT = """\
 name = lineDesktop
 summary = "LINE Desktop Accessibility"
-description = \"\"\"Enhances NVDA accessibility support for the LINE desktop application on Windows.
-Provides improved navigation for chat lists, messages, contacts, and message input.\"\"\"
+description = \"\"\"Enhances NVDA accessibility support for LINE Desktop on Windows.
+Provides improved navigation for chat lists, messages, contacts, and message input.
+Supports calls, incoming call handling, OCR-assisted reading, message export reading, and AI image description with follow-up questions.\"\"\"
 author = "張可揚 <lindsay714322@gmail.com>; 洪鳳恩 <kittyhong0208@gmail.com>; 蔡頭<tommytsaitou>"
 url = https://keyang556.github.io/linedesktopnvda/
 version = 1.2.4-beta9
-changelog = \"\"\"Initial release with LINE desktop accessibility support.\"\"\"
+changelog = \"\"\"Added an AI image description dialog with a read-only transcript and follow-up questions.
+Added settings for the image description service, API key, model, and prompt.
+Completed translations and documentation for all supported languages.\"\"\"
 docFileName = readme.html
 minimumNVDAVersion = 2019.3
 lastTestedNVDAVersion = 2026.1
