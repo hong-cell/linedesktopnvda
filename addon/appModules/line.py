@@ -2826,8 +2826,8 @@ def _getChatHeaderIconPointFromRect(screenRect, scale, iconIndex=0):
 	return (iconX, iconY)
 
 
-def _getChatHeaderIconPoint(hwnd, iconIndex=0):
-	"""Return a LINE chat header icon point in screen coordinates.
+def _getChatHeaderIconPointInfo(hwnd, iconIndex=0):
+	"""Return a LINE chat header icon point and source rect in screen coordinates.
 
 	Use the client area before the outer window frame so hidden resize borders
 	and DWM frame differences do not shift header clicks across DPI settings.
@@ -2853,7 +2853,17 @@ def _getChatHeaderIconPoint(hwnd, iconIndex=0):
 			f"LINE: chat header icon index={iconIndex} outside rect={contentRect}, "
 			f"source={rectSource}, dpiScale={scale:.2f}",
 		)
-	return point
+	if not point:
+		return None
+	return (point, contentRect)
+
+
+def _getChatHeaderIconPoint(hwnd, iconIndex=0):
+	"""Return a LINE chat header icon point in screen coordinates."""
+	iconInfo = _getChatHeaderIconPointInfo(hwnd, iconIndex=iconIndex)
+	if not iconInfo:
+		return None
+	return iconInfo[0]
 
 
 # Physical-pixel cap for the right edge of LINE's left sidebar (icons column +
@@ -6657,10 +6667,10 @@ class AppModule(appModuleHandler.AppModule):
 			log.debug("LINE: no foreground window for header click")
 			return None
 
-		iconPoint = _getChatHeaderIconPoint(hwnd, iconIndex=2)
-		contentRect = _getWindowClientScreenRect(hwnd) or _getWindowScreenRect(hwnd)
-		if not iconPoint or not contentRect:
+		iconInfo = _getChatHeaderIconPointInfo(hwnd, iconIndex=2)
+		if not iconInfo:
 			return None
+		iconPoint, contentRect = iconInfo
 
 		return (iconPoint[0], iconPoint[1], contentRect[2])
 

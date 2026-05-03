@@ -273,8 +273,9 @@ _KNOWN_100_PERCENT_ROW_LAYOUT = (
 )
 _KNOWN_100_PERCENT_ROW_INDEX_BY_LABEL = dict(_KNOWN_100_PERCENT_ROW_LAYOUT)
 _REMINDER_TOGGLE_LABELS = {"開啟提醒", "關閉提醒"}
-for _label in _REMINDER_TOGGLE_LABELS:
-	_KNOWN_100_PERCENT_ROW_INDEX_BY_LABEL[_label] = 0
+_KNOWN_100_PERCENT_ROW_INDEX_BY_LABEL.update(
+	(label, 0) for label in _REMINDER_TOGGLE_LABELS
+)
 _KNOWN_100_PERCENT_ANCHOR_LABELS = {
 	"投票",
 	"儲存聊天",
@@ -288,7 +289,7 @@ def _inferKnownMenuRowIndex(
 	label: str | None,
 	rowRects: list[tuple[int, int, int, int]],
 ) -> int | None:
-	# At 100% LINE exposes an extra row-like separator between 投票 and 儲存聊天.
+	# At 100%/125% LINE exposes 12 row rects; the final bottom info row is non-actionable.
 	if len(rowRects) != 12:
 		return None
 	return _KNOWN_100_PERCENT_ROW_INDEX_BY_LABEL.get(label or "")

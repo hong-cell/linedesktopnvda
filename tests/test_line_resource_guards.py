@@ -147,13 +147,19 @@ def test_chat_header_icon_point_prefers_client_rect_over_outer_frame():
 			"_CHAT_HEADER_ICON_SPACING_BASE",
 			"_CHAT_HEADER_FIRST_ICON_OFFSET_BASE",
 		},
-		function_names={"_scaleLineUiPixels", "_getChatHeaderIconPointFromRect", "_getChatHeaderIconPoint"},
+		function_names={
+			"_scaleLineUiPixels",
+			"_getChatHeaderIconPointFromRect",
+			"_getChatHeaderIconPointInfo",
+			"_getChatHeaderIconPoint",
+		},
 		namespace={"log": _Log()},
 	)
 	ns["_getDpiScale"] = lambda _hwnd: 1.5
 	ns["_getWindowClientScreenRect"] = lambda _hwnd: (12, 34, 1912, 1074)
 	ns["_getWindowScreenRect"] = lambda _hwnd: (0, 0, 1920, 1080)
 
+	assert ns["_getChatHeaderIconPointInfo"](101, iconIndex=0) == ((1890, 116), (12, 34, 1912, 1074))
 	assert ns["_getChatHeaderIconPoint"](101, iconIndex=0) == (1890, 116)
 
 
