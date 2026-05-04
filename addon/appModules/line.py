@@ -2847,7 +2847,7 @@ def _geminiContentsToNvidiaMessages(contents):
 						{
 							"type": "image_url",
 							"image_url": {"url": f"data:{mime};base64,{data}"},
-						}
+						},
 					)
 		if not parts:
 			parts = [{"type": "text", "text": ""}]
