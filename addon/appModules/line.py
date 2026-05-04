@@ -1817,14 +1817,17 @@ _suppressAddon = False
 # Image description backend providers exposed in the settings panel.
 _IMAGE_DESCRIPTION_PROVIDER_GOOGLE = "google"
 _IMAGE_DESCRIPTION_PROVIDER_OLLAMA = "ollama"
+_IMAGE_DESCRIPTION_PROVIDER_NVIDIA = "nvidia"
 _IMAGE_DESCRIPTION_AVAILABLE_PROVIDERS = (
 	_IMAGE_DESCRIPTION_PROVIDER_GOOGLE,
 	_IMAGE_DESCRIPTION_PROVIDER_OLLAMA,
+	_IMAGE_DESCRIPTION_PROVIDER_NVIDIA,
 )
 _IMAGE_DESCRIPTION_DEFAULT_PROVIDER = _IMAGE_DESCRIPTION_PROVIDER_GOOGLE
 _IMAGE_DESCRIPTION_PROVIDER_LABELS = {
 	_IMAGE_DESCRIPTION_PROVIDER_GOOGLE: "Google AI",
 	_IMAGE_DESCRIPTION_PROVIDER_OLLAMA: "Ollama Cloud",
+	_IMAGE_DESCRIPTION_PROVIDER_NVIDIA: "NVIDIA NIM",
 }
 _IMAGE_DESCRIPTION_USER_PROVIDER_FILENAME = "line_desktop_image_provider.txt"
 
@@ -1842,15 +1845,20 @@ _IMAGE_DESCRIPTION_DEFAULT_KEY_BLOB = (
 	"g+Ku1l+8YmbpO4/JPwy+ZyMlZw4Nfm9gO5bbn8K/vPkz7VFoMRpiFsx2hgfKpUqbxmWqQGo2h8Ph7YjZljEEFkmc3+HlxuE="
 )
 _IMAGE_DESCRIPTION_OLLAMA_DEFAULT_KEY_BLOB = "oLtfHW4hFhTMLQ0mKKcEqd70nU8Z9EsEjjSKfueLCUCnJD9oee2CTd3GtTi0LyS6ZJMuee/jIxFiXDH9kzdyFOMVRfIjMRxJzqZxnccS+p5B1gjbWxYyMLY="
+_IMAGE_DESCRIPTION_NVIDIA_DEFAULT_KEY_BLOB = "z4L9t8i44kXzffkss7ukUYezYDRvTRxxgKURaLeyOl2Ea8kLN4dNweWybeuf4F8SD6I8ArEWqbvry5BB2o4MxerrJgd0OZD8pQNm9Nw6P7RE2mDI1xktlM4bj6XpwU9G/0wFnMMn"
 _IMAGE_DESCRIPTION_USER_KEY_FILENAME = "line_desktop_image_api_key.dat"
 _IMAGE_DESCRIPTION_USER_OLLAMA_KEY_FILENAME = "line_desktop_ollama_api_key.dat"
+_IMAGE_DESCRIPTION_USER_NVIDIA_KEY_FILENAME = "line_desktop_nvidia_api_key.dat"
 _IMAGE_DESCRIPTION_USER_MODEL_FILENAME = "line_desktop_image_model.txt"
 _IMAGE_DESCRIPTION_USER_OLLAMA_MODEL_FILENAME = "line_desktop_ollama_model.txt"
+_IMAGE_DESCRIPTION_USER_NVIDIA_MODEL_FILENAME = "line_desktop_nvidia_model.txt"
 _IMAGE_DESCRIPTION_USER_PROMPT_FILENAME = "line_desktop_image_prompt.txt"
 # Default Google model used when the user has not picked one in the settings panel.
 _IMAGE_DESCRIPTION_DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
 # Default Ollama Cloud model used when the user has not picked one in the settings panel.
 _IMAGE_DESCRIPTION_OLLAMA_DEFAULT_MODEL = "gemini-3-flash-preview:cloud"
+# Default NVIDIA NIM model used when the user has not picked one in the settings panel.
+_IMAGE_DESCRIPTION_NVIDIA_DEFAULT_MODEL = "mistralai/mistral-medium-3.5-128b"
 # Models exposed in the settings panel dropdown. The order here is the order
 # the user sees. Strings are the actual model IDs sent to the API endpoint.
 # VERIFY all IDs against: GET https://generativelanguage.googleapis.com/v1beta/models
@@ -1877,10 +1885,22 @@ _IMAGE_DESCRIPTION_OLLAMA_AVAILABLE_MODELS = (
 	"qwen3.5:397b-cloud",
 	"gemma4:31b-cloud",
 )
+# Vision-capable models exposed for NVIDIA NIM. Users can pick whichever they have
+# access to; unavailable IDs surface as an HTTP error.
+_IMAGE_DESCRIPTION_NVIDIA_AVAILABLE_MODELS = (
+	"moonshotai/kimi-k2.6",
+	"mistralai/mistral-medium-3.5-128b",
+	"nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+	"google/gemma-4-31b-it",
+	"mistralai/mistral-small-4-119b-2603",
+	"qwen/qwen3.5-122b-a10b",
+	"qwen/qwen3.5-397b-a17b",
+)
 _IMAGE_DESCRIPTION_ENDPOINT = (
 	"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 )
 _IMAGE_DESCRIPTION_OLLAMA_ENDPOINT = "https://ollama.com/api/chat"
+_IMAGE_DESCRIPTION_NVIDIA_ENDPOINT = "https://integrate.api.nvidia.com/v1/chat/completions"
 _IMAGE_DESCRIPTION_DEFAULT_PROMPT = "請用繁體中文簡要描述這張圖片的內容。"
 # Maximum length accepted from user-supplied prompts, to avoid pathological
 # payloads being sent to the API.
@@ -1896,8 +1916,10 @@ _NOT_COMPUTED = object()
 # After that, _getEffectiveImageApiKey() is a pure memory read (no PBKDF2).
 _cachedEffectiveImageApiKey = _NOT_COMPUTED
 _cachedEffectiveOllamaApiKey = _NOT_COMPUTED
+_cachedEffectiveNvidiaApiKey = _NOT_COMPUTED
 _cachedEffectiveImageProvider = _NOT_COMPUTED
 _cachedEffectiveOllamaModel = _NOT_COMPUTED
+_cachedEffectiveNvidiaModel = _NOT_COMPUTED
 
 
 def _deriveImageApiKeyMaterial(salt, length):
@@ -2090,6 +2112,71 @@ def _getEffectiveOllamaApiKey():
 	if _cachedEffectiveOllamaApiKey is _NOT_COMPUTED:
 		_initEffectiveOllamaApiKey()
 	return _cachedEffectiveOllamaApiKey
+
+
+def _getNvidiaApiKeyStorePath():
+	"""Return the filesystem path for the user-supplied NVIDIA NIM API key file."""
+	try:
+		import globalVars
+
+		configPath = globalVars.appArgs.configPath
+	except Exception:
+		return None
+	if not configPath:
+		return None
+	return os.path.join(configPath, _IMAGE_DESCRIPTION_USER_NVIDIA_KEY_FILENAME)
+
+
+def getUserNvidiaApiKey():
+	"""Return the plain NVIDIA NIM API key previously set by the user, or None."""
+	path = _getNvidiaApiKeyStorePath()
+	if not path or not os.path.isfile(path):
+		return None
+	try:
+		with open(path, "r", encoding="utf-8") as f:
+			blob = f.read().strip()
+	except Exception as e:
+		log.debug(f"LINE: failed to read user NVIDIA API key: {e}", exc_info=True)
+		return None
+	return _deobfuscateImageApiKey(blob)
+
+
+def setUserNvidiaApiKey(plain):
+	"""Persist a user-supplied NVIDIA NIM API key (obfuscated). Empty/None clears it."""
+	global _cachedEffectiveNvidiaApiKey
+	path = _getNvidiaApiKeyStorePath()
+	if not path:
+		return False
+	try:
+		if not plain:
+			if os.path.isfile(path):
+				os.remove(path)
+			_cachedEffectiveNvidiaApiKey = _deobfuscateImageApiKey(_IMAGE_DESCRIPTION_NVIDIA_DEFAULT_KEY_BLOB)
+		else:
+			blob = _obfuscateImageApiKey(plain)
+			with open(path, "w", encoding="utf-8") as f:
+				f.write(blob)
+			_cachedEffectiveNvidiaApiKey = plain
+		return True
+	except Exception as e:
+		log.warning(f"LINE: failed to save user NVIDIA API key: {e}", exc_info=True)
+		return False
+
+
+def _initEffectiveNvidiaApiKey():
+	"""Decrypt and cache the effective NVIDIA NIM API key."""
+	global _cachedEffectiveNvidiaApiKey
+	userKey = getUserNvidiaApiKey()
+	_cachedEffectiveNvidiaApiKey = userKey or _deobfuscateImageApiKey(
+		_IMAGE_DESCRIPTION_NVIDIA_DEFAULT_KEY_BLOB,
+	)
+
+
+def _getEffectiveNvidiaApiKey():
+	"""Return the cached NVIDIA NIM API key; falls back to lazy init if not yet computed."""
+	if _cachedEffectiveNvidiaApiKey is _NOT_COMPUTED:
+		_initEffectiveNvidiaApiKey()
+	return _cachedEffectiveNvidiaApiKey
 
 
 def _getImageProviderStorePath():
@@ -2285,6 +2372,70 @@ def _getEffectiveOllamaModel():
 	if _cachedEffectiveOllamaModel is _NOT_COMPUTED:
 		_cachedEffectiveOllamaModel = getUserOllamaModel() or _IMAGE_DESCRIPTION_OLLAMA_DEFAULT_MODEL
 	return _cachedEffectiveOllamaModel
+
+
+def _getNvidiaModelStorePath():
+	"""Return the filesystem path for the user-selected NVIDIA NIM model preference."""
+	try:
+		import globalVars
+
+		configPath = globalVars.appArgs.configPath
+	except Exception:
+		return None
+	if not configPath:
+		return None
+	return os.path.join(configPath, _IMAGE_DESCRIPTION_USER_NVIDIA_MODEL_FILENAME)
+
+
+def getUserNvidiaModel():
+	"""Return the NVIDIA NIM model ID previously chosen by the user, or None."""
+	path = _getNvidiaModelStorePath()
+	if not path or not os.path.isfile(path):
+		return None
+	try:
+		with open(path, "r", encoding="utf-8") as f:
+			value = f.read().strip()
+	except Exception as e:
+		log.debug(f"LINE: failed to read user NVIDIA model: {e}", exc_info=True)
+		return None
+	if not value:
+		return None
+	if value not in _IMAGE_DESCRIPTION_NVIDIA_AVAILABLE_MODELS:
+		log.debug(f"LINE: stored NVIDIA model {value!r} is not in the allowed list")
+		return None
+	return value
+
+
+def setUserNvidiaModel(name):
+	"""Persist a user-selected NVIDIA NIM model. Empty/None or default clears the file."""
+	global _cachedEffectiveNvidiaModel
+	path = _getNvidiaModelStorePath()
+	if not path:
+		return False
+	try:
+		if not name or name == _IMAGE_DESCRIPTION_NVIDIA_DEFAULT_MODEL:
+			if os.path.isfile(path):
+				os.remove(path)
+			_cachedEffectiveNvidiaModel = _IMAGE_DESCRIPTION_NVIDIA_DEFAULT_MODEL
+			return True
+		if name not in _IMAGE_DESCRIPTION_NVIDIA_AVAILABLE_MODELS:
+			log.warning(f"LINE: refusing to save unknown NVIDIA model {name!r}")
+			return False
+		with open(path, "w", encoding="utf-8") as f:
+			f.write(name)
+		_cachedEffectiveNvidiaModel = name
+		return True
+	except Exception as e:
+		log.warning(f"LINE: failed to save user NVIDIA model: {e}", exc_info=True)
+		return False
+
+
+def _getEffectiveNvidiaModel():
+	"""Return the cached NVIDIA model ID; lazily resolved from disk on first call."""
+	global _cachedEffectiveNvidiaModel
+	if _cachedEffectiveNvidiaModel is _NOT_COMPUTED:
+		_cachedEffectiveNvidiaModel = getUserNvidiaModel() or _IMAGE_DESCRIPTION_NVIDIA_DEFAULT_MODEL
+	return _cachedEffectiveNvidiaModel
 
 
 def _getImagePromptStorePath():
@@ -2495,6 +2646,11 @@ def _callImageDescriptionApi(contents, timeout=None):
 			contents,
 			timeout=timeout if timeout is not None else 60.0,
 		)
+	if provider == _IMAGE_DESCRIPTION_PROVIDER_NVIDIA:
+		return _callNvidiaImageDescriptionApi(
+			contents,
+			timeout=timeout if timeout is not None else 60.0,
+		)
 	return _callGoogleImageDescriptionApi(
 		contents,
 		timeout=timeout if timeout is not None else 30.0,
@@ -2659,6 +2815,119 @@ def _callOllamaImageDescriptionApi(contents, timeout=60.0):
 	except Exception as e:
 		log.warning(
 			f"LINE: Ollama image description response parse failed: {e}",
+			exc_info=True,
+		)
+	return None, _("圖片描述失敗 (無回應)")
+
+
+def _geminiContentsToNvidiaMessages(contents):
+	"""Convert the canonical Gemini-shaped contents into NVIDIA NIM chat messages.
+
+	NVIDIA NIM exposes an OpenAI-compatible chat completions API. Each message has
+	{"role": "user"|"assistant", "content": [...]}, where content parts are either
+	{"type": "text", "text": ...} or {"type": "image_url",
+	"image_url": {"url": "data:image/png;base64,..."}}.
+	"""
+	messages = []
+	for turn in contents or []:
+		role = turn.get("role") if isinstance(turn, dict) else None
+		nvRole = "assistant" if role == "model" else "user"
+		parts = []
+		for part in (turn.get("parts") or []) if isinstance(turn, dict) else []:
+			if not isinstance(part, dict):
+				continue
+			if "text" in part and part["text"]:
+				parts.append({"type": "text", "text": part["text"]})
+			elif "inline_data" in part:
+				inline = part.get("inline_data") or {}
+				data = inline.get("data")
+				mime = inline.get("mime_type") or "image/png"
+				if data:
+					parts.append(
+						{
+							"type": "image_url",
+							"image_url": {"url": f"data:{mime};base64,{data}"},
+						},
+					)
+		if not parts:
+			log.debug(f"LINE: skipping empty NVIDIA turn with role {nvRole!r}")
+			continue
+		messages.append({"role": nvRole, "content": parts})
+	return messages
+
+
+def _callNvidiaImageDescriptionApi(contents, timeout=60.0):
+	"""Send the canonical contents to NVIDIA NIM's OpenAI-compatible chat endpoint.
+
+	Returns (text, None) on success or (None, error_msg) on failure.
+	"""
+	try:
+		import json
+		import urllib.request
+		import urllib.error
+
+		apiKey = _getEffectiveNvidiaApiKey()
+		if not apiKey:
+			log.warning("LINE: no NVIDIA NIM API key available")
+			return None, _("未設定 API Key")
+		messages = _geminiContentsToNvidiaMessages(contents)
+		body = {
+			"model": _getEffectiveNvidiaModel(),
+			"messages": messages,
+			"max_tokens": 512,
+			"stream": False,
+		}
+		req = urllib.request.Request(
+			_IMAGE_DESCRIPTION_NVIDIA_ENDPOINT,
+			data=json.dumps(body).encode("utf-8"),
+			headers={
+				"Content-Type": "application/json",
+				"Authorization": f"Bearer {apiKey}",
+				"Accept": "application/json",
+			},
+			method="POST",
+		)
+		try:
+			with urllib.request.urlopen(req, timeout=timeout) as resp:
+				raw = resp.read()
+		except urllib.error.HTTPError as e:
+			errBody = e.read().decode("utf-8", errors="replace")
+			log.warning(
+				f"LINE: NVIDIA image description HTTP {e.code} {e.reason}: {errBody[:500]}",
+			)
+			return None, _("圖片描述失敗 (HTTP {code})").format(code=e.code)
+		except Exception as e:
+			log.warning(f"LINE: NVIDIA image description network error: {e}", exc_info=True)
+			return None, _("圖片描述失敗 (網路錯誤)")
+		data = json.loads(raw.decode("utf-8", errors="replace"))
+	except Exception as e:
+		log.warning(
+			f"LINE: NVIDIA image description request failed: {e}",
+			exc_info=True,
+		)
+		return None, _("圖片描述失敗")
+
+	try:
+		choices = data.get("choices") if isinstance(data, dict) else None
+		if isinstance(choices, list) and choices:
+			message = choices[0].get("message") if isinstance(choices[0], dict) else None
+			if isinstance(message, dict):
+				text = message.get("content")
+				# Some NIM responses return content as a list of parts.
+				if isinstance(text, list):
+					collected = []
+					for part in text:
+						if isinstance(part, dict):
+							inner = part.get("text")
+							if inner:
+								collected.append(inner)
+					text = "".join(collected)
+				if text:
+					return text.strip(), None
+		log.info(f"LINE: NVIDIA image description returned no content: {data!r}")
+	except Exception as e:
+		log.warning(
+			f"LINE: NVIDIA image description response parse failed: {e}",
 			exc_info=True,
 		)
 	return None, _("圖片描述失敗 (無回應)")
@@ -5855,6 +6124,7 @@ class AppModule(appModuleHandler.AppModule):
 		# during an actual image-description request.
 		_initEffectiveImageApiKey()
 		_initEffectiveOllamaApiKey()
+		_initEffectiveNvidiaApiKey()
 		log.info(
 			f"LINE AppModule loaded for process: {self.processID}, "
 			f"exe: {self.appName}, "

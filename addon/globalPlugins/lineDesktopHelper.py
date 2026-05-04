@@ -239,13 +239,17 @@ class LineDesktopSettingsPanel(SettingsPanel):
 	def _loadStoredApiKey(self, provider):
 		try:
 			from appModules.line import (
+				_IMAGE_DESCRIPTION_PROVIDER_NVIDIA,
 				_IMAGE_DESCRIPTION_PROVIDER_OLLAMA,
 				getUserImageApiKey,
+				getUserNvidiaApiKey,
 				getUserOllamaApiKey,
 			)
 
 			if provider == _IMAGE_DESCRIPTION_PROVIDER_OLLAMA:
 				return getUserOllamaApiKey() or ""
+			if provider == _IMAGE_DESCRIPTION_PROVIDER_NVIDIA:
+				return getUserNvidiaApiKey() or ""
 			return getUserImageApiKey() or ""
 		except Exception:
 			log.debug(
@@ -258,14 +262,19 @@ class LineDesktopSettingsPanel(SettingsPanel):
 		try:
 			from appModules.line import (
 				_IMAGE_DESCRIPTION_DEFAULT_MODEL,
+				_IMAGE_DESCRIPTION_NVIDIA_DEFAULT_MODEL,
 				_IMAGE_DESCRIPTION_OLLAMA_DEFAULT_MODEL,
+				_IMAGE_DESCRIPTION_PROVIDER_NVIDIA,
 				_IMAGE_DESCRIPTION_PROVIDER_OLLAMA,
 				getUserImageModel,
+				getUserNvidiaModel,
 				getUserOllamaModel,
 			)
 
 			if provider == _IMAGE_DESCRIPTION_PROVIDER_OLLAMA:
 				return getUserOllamaModel() or _IMAGE_DESCRIPTION_OLLAMA_DEFAULT_MODEL
+			if provider == _IMAGE_DESCRIPTION_PROVIDER_NVIDIA:
+				return getUserNvidiaModel() or _IMAGE_DESCRIPTION_NVIDIA_DEFAULT_MODEL
 			return getUserImageModel() or _IMAGE_DESCRIPTION_DEFAULT_MODEL
 		except Exception:
 			log.debug(
@@ -280,8 +289,11 @@ class LineDesktopSettingsPanel(SettingsPanel):
 			from appModules.line import (
 				_IMAGE_DESCRIPTION_AVAILABLE_MODELS,
 				_IMAGE_DESCRIPTION_DEFAULT_MODEL,
+				_IMAGE_DESCRIPTION_NVIDIA_AVAILABLE_MODELS,
+				_IMAGE_DESCRIPTION_NVIDIA_DEFAULT_MODEL,
 				_IMAGE_DESCRIPTION_OLLAMA_AVAILABLE_MODELS,
 				_IMAGE_DESCRIPTION_OLLAMA_DEFAULT_MODEL,
+				_IMAGE_DESCRIPTION_PROVIDER_NVIDIA,
 				_IMAGE_DESCRIPTION_PROVIDER_OLLAMA,
 			)
 
@@ -289,6 +301,11 @@ class LineDesktopSettingsPanel(SettingsPanel):
 				return (
 					_IMAGE_DESCRIPTION_OLLAMA_AVAILABLE_MODELS,
 					_IMAGE_DESCRIPTION_OLLAMA_DEFAULT_MODEL,
+				)
+			if provider == _IMAGE_DESCRIPTION_PROVIDER_NVIDIA:
+				return (
+					_IMAGE_DESCRIPTION_NVIDIA_AVAILABLE_MODELS,
+					_IMAGE_DESCRIPTION_NVIDIA_DEFAULT_MODEL,
 				)
 			return (
 				_IMAGE_DESCRIPTION_AVAILABLE_MODELS,
@@ -356,10 +373,13 @@ class LineDesktopSettingsPanel(SettingsPanel):
 		# Image description API keys (one per provider)
 		try:
 			from appModules.line import (
+				_IMAGE_DESCRIPTION_PROVIDER_NVIDIA,
 				_IMAGE_DESCRIPTION_PROVIDER_OLLAMA,
 				getUserImageApiKey,
+				getUserNvidiaApiKey,
 				getUserOllamaApiKey,
 				setUserImageApiKey,
+				setUserNvidiaApiKey,
 				setUserOllamaApiKey,
 			)
 
@@ -367,6 +387,9 @@ class LineDesktopSettingsPanel(SettingsPanel):
 				if providerId == _IMAGE_DESCRIPTION_PROVIDER_OLLAMA:
 					currentKey = getUserOllamaApiKey() or ""
 					setter = setUserOllamaApiKey
+				elif providerId == _IMAGE_DESCRIPTION_PROVIDER_NVIDIA:
+					currentKey = getUserNvidiaApiKey() or ""
+					setter = setUserNvidiaApiKey
 				else:
 					currentKey = getUserImageApiKey() or ""
 					setter = setUserImageApiKey
@@ -396,11 +419,15 @@ class LineDesktopSettingsPanel(SettingsPanel):
 		try:
 			from appModules.line import (
 				_IMAGE_DESCRIPTION_DEFAULT_MODEL,
+				_IMAGE_DESCRIPTION_NVIDIA_DEFAULT_MODEL,
 				_IMAGE_DESCRIPTION_OLLAMA_DEFAULT_MODEL,
+				_IMAGE_DESCRIPTION_PROVIDER_NVIDIA,
 				_IMAGE_DESCRIPTION_PROVIDER_OLLAMA,
 				getUserImageModel,
+				getUserNvidiaModel,
 				getUserOllamaModel,
 				setUserImageModel,
+				setUserNvidiaModel,
 				setUserOllamaModel,
 			)
 
@@ -410,6 +437,9 @@ class LineDesktopSettingsPanel(SettingsPanel):
 				if providerId == _IMAGE_DESCRIPTION_PROVIDER_OLLAMA:
 					currentModel = getUserOllamaModel() or _IMAGE_DESCRIPTION_OLLAMA_DEFAULT_MODEL
 					setter = setUserOllamaModel
+				elif providerId == _IMAGE_DESCRIPTION_PROVIDER_NVIDIA:
+					currentModel = getUserNvidiaModel() or _IMAGE_DESCRIPTION_NVIDIA_DEFAULT_MODEL
+					setter = setUserNvidiaModel
 				else:
 					currentModel = getUserImageModel() or _IMAGE_DESCRIPTION_DEFAULT_MODEL
 					setter = setUserImageModel
