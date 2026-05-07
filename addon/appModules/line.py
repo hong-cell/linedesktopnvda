@@ -9449,6 +9449,7 @@ class AppModule(appModuleHandler.AppModule):
 				ui.message(
 					f"{replyInfo['originalName']} {replyInfo['originalContent']}",
 				)
+				_chatCache.clearLastReplyInfo()
 				return
 		global _lastOCRElement, _chatListMode
 		# Exiting chat list mode on Tab/Shift+Tab navigation

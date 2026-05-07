@@ -352,6 +352,12 @@ def getLastReplyInfo():
 	return _lastReplyInfo
 
 
+def clearLastReplyInfo():
+	"""Clear cached reply context so the left-arrow handler fires only once."""
+	global _lastReplyInfo
+	_lastReplyInfo = None
+
+
 def lookupMessage(ocrText):
 	"""Return the cached message that best matches the OCR snippet.
 
