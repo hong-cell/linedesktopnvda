@@ -564,10 +564,10 @@ def _getVoiceCallConfirmationState(text):
 	if action != "join":
 		compact = _normalizeVoiceCallConfirmationLine(text)
 		lower = compact.lower()
-		hasJoinHint = any(
-			keyword in compact
-			for keyword in ("加入", "參加", "参加", "已加入", "已參加", "已参加")
-		) or "join" in lower
+		hasJoinHint = (
+			any(keyword in compact for keyword in ("加入", "參加", "参加", "已加入", "已參加", "已参加"))
+			or "join" in lower
+		)
 		if hasJoinHint and isGroup:
 			action = "join"
 
