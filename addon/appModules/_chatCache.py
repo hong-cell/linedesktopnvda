@@ -282,9 +282,13 @@ def _detectReplyNames(ocrText):
 		name = msg.get("name", "")
 		if not name or name in seen:
 			continue
-		idx = ocrText.find(name)
-		if idx >= 0:
-			occurrences.append((idx, name))
+		# Require the name to occupy an entire line so that (a) names
+		# mentioned in message bodies don't trigger the reply filter, and
+		# (b) short names that are substrings of longer names don't match
+		# a line belonging to the longer name.
+		m = re.search(r"(?m)^" + re.escape(name) + r"\s*$", ocrText)
+		if m:
+			occurrences.append((m.start(), name))
 			seen.add(name)
 	if len(occurrences) < 2:
 		return None, None
